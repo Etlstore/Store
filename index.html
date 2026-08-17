@@ -128,6 +128,7 @@ const PAGE_DEFS = [
   {id:'stock', label:'Stock Balance'},
   {id:'ledger', label:'Daily / Ledger Report'},
   {id:'items', label:'Items'},
+  {id:'suppliers', label:'Suppliers'},
   {id:'stores', label:'Stores'},
   {id:'users', label:'Users'},
 ];
@@ -233,7 +234,7 @@ function showTab(id){
   const renderers = {
     dashboard: renderDashboard, grn: renderGRN, issues: renderIssues,
     transfers: renderTransfers, stock: renderStock, ledger: renderLedger,
-    items: renderItems, stores: renderStores, users: renderUsers,
+    items: renderItems, suppliers: renderSuppliers, stores: renderStores, users: renderUsers,
     permissions: renderPermissions
   };
   (renderers[id]||renderDashboard)();
@@ -291,16 +292,21 @@ async function renderGRN(){
     <div class="card">
       <h2>New GRN — Stock In</h2>
       <form class="inline" onsubmit="submitGRN(event)">
-        <div class="fld"><label>GRN Date</label><input type="date" id="g_date" value="${todayStr()}" required></div>
+        <div class="fld"><label>GRN Date</label><input type="date" id="g_date" value="${todayStr()}" required onchange="autoFillGRN()"></div>
         <div class="fld"><label>Store</label><select id="g_store" required><option value="">Select</option>${storeOptions()}</select></div>
-        <div class="fld"><label>Item</label><select id="g_item" required><option value="">Select</option>${itemOptions()}</select></div>
-        <div class="fld"><label>Batch / Lot No.</label><input id="g_batch" placeholder="e.g. B-2026-081" required></div>
+        <div class="fld"><label>Item</label><select id="g_item" required onchange="autoFillGRN()"><option value="">Select</option>${itemOptions()}</select></div>
+        <div class="fld"><label>Batch / Lot No. <span class="muted">(auto, editable)</span></label><input id="g_batch" placeholder="Select an item first" required></div>
         <div class="fld"><label>Qty</label><input type="number" id="g_qty" step="0.01" min="0.01" required></div>
-        <div class="fld"><label>Unit Cost</label><input type="number" id="g_cost" step="0.01" value="0"></div>
+        <div class="fld"><label>Unit Cost <span class="muted">(auto, editable)</span></label><input type="number" id="g_cost" step="0.01" value="0"></div>
         <div class="fld"><label>Supplier</label><select id="g_supplier"><option value="">-</option>${SUPPLIERS.map(s=>`<option value="${s.id}">${s.name}</option>`).join('')}</select></div>
         <div class="fld"><label>PO Ref</label><input id="g_po" placeholder="PO number"></div>
         <div class="fld"><button class="btn" type="submit">Save GRN</button></div>
       </form>
+      <div class="toolbar" style="margin-top:8px;border-top:1px solid var(--line);padding-top:14px;">
+        <div class="fld"><label>New Supplier Name</label><input id="g_new_supplier" placeholder="Type supplier name" style="min-width:220px;"></div>
+        <button type="button" class="btn ghost" onclick="addSupplierQuick()">+ Add Supplier</button>
+      </div>
+      <p class="muted">Suppliers on file: ${SUPPLIERS.length===0 ? 'none yet — add one above' : SUPPLIERS.map(s=>s.name).join(', ')}</p>
     </div>` : noEditNotice('GRN entry')}
     <div class="card">
       <h2>Recent GRN Entries</h2>
@@ -324,6 +330,25 @@ async function submitGRN(ev){
   if(error){ alert('Error saving GRN: '+error.message); return; }
   renderGRN();
 }
+async function autoFillGRN(){
+  const itemId = document.getElementById('g_item').value;
+  if(!itemId) return;
+  const item = ITEMS.find(i=>i.id===itemId);
+  if(!item) return;
+  document.getElementById('g_cost').value = item.standard_cost || 0;
+  const dateStr = (document.getElementById('g_date').value || todayStr()).replace(/-/g,'');
+  const { count } = await sb.from('grn').select('id',{count:'exact',head:true}).eq('item_id', itemId).eq('grn_date', document.getElementById('g_date').value || todayStr());
+  const seq = (count||0)+1;
+  document.getElementById('g_batch').value = `${item.item_code}-${dateStr}-${String(seq).padStart(3,'0')}`;
+}
+async function addSupplierQuick(){
+  const name = document.getElementById('g_new_supplier').value.trim();
+  if(!name) return;
+  const { error } = await sb.from('suppliers').insert({name});
+  if(error){ alert('Error adding supplier: '+error.message); return; }
+  await loadMasters();
+  renderGRN();
+}
 
 /* ---------------- ISSUES (Stock Out) ---------------- */
 async function renderIssues(){
@@ -340,7 +365,26 @@ async function renderIssues(){
         <div class="fld"><label>Item</label><select id="i_item" required><option value="">Select</option>${itemOptions()}</select></div>
         <div class="fld"><label>Batch / Lot No.</label><input id="i_batch" placeholder="e.g. B-2026-081" required></div>
         <div class="fld"><label>Qty</label><input type="number" id="i_qty" step="0.01" min="0.01" required></div>
-        <div class="fld"><label>Issued To (Dept.)</label><input id="i_to" placeholder="e.g. Production - Woven"></div>
+        <div class="fld"><label>Issued To (Department)</label>
+          <select id="i_to" onchange="document.getElementById('i_to_other').classList.toggle('hidden', this.value!=='Other')">
+            <option value="Production - Woven">Production - Woven</option>
+            <option value="Production - Care Label">Production - Care Label</option>
+            <option value="Production - Adhesive">Production - Adhesive</option>
+            <option value="Production - Patch">Production - Patch</option>
+            <option value="Production - Packaging">Production - Packaging</option>
+            <option value="Production - Heat Transfer">Production - Heat Transfer</option>
+            <option value="Production - Thermal">Production - Thermal</option>
+            <option value="Cutting">Cutting</option>
+            <option value="Finishing">Finishing</option>
+            <option value="Quality / QC">Quality / QC</option>
+            <option value="Packing">Packing</option>
+            <option value="Sample / Development">Sample / Development</option>
+            <option value="Sales / Commercial">Sales / Commercial</option>
+            <option value="Other">Other (type below)</option>
+          </select>
+          <input id="i_to_other" placeholder="Type department" class="hidden" style="margin-top:6px;">
+        </div>
+        <div class="fld"><label>Style No.</label><input id="i_style" placeholder="Buyer style number"></div>
         <div class="fld"><label>Order / Job Ref</label><input id="i_ref" placeholder="Buyer PO / Job card"></div>
         <div class="fld"><button class="btn" type="submit">Save Issue</button></div>
       </form>
@@ -348,18 +392,20 @@ async function renderIssues(){
     <div class="card">
       <h2>Recent Issue Entries</h2>
       <div class="tablewrap"><table>
-        <tr><th>Issue No.</th><th>Date</th><th>Store</th><th>Item</th><th>Batch</th><th>Qty</th><th>Issued To</th><th>Order Ref</th></tr>
-        ${(recent||[]).map(r=>`<tr><td>${r.issue_no}</td><td>${r.issue_date}</td><td>${r.stores?.name||''}</td><td>${r.items?.item_code} — ${r.items?.item_name}</td><td>${r.batch_no}</td><td>${fmt(r.qty)} ${r.items?.uom||''}</td><td>${r.issued_to||'-'}</td><td>${r.order_ref||'-'}</td></tr>`).join('')}
+        <tr><th>Issue No.</th><th>Date</th><th>Store</th><th>Item</th><th>Batch</th><th>Qty</th><th>Issued To</th><th>Style No.</th><th>Order Ref</th></tr>
+        ${(recent||[]).map(r=>`<tr><td>${r.issue_no}</td><td>${r.issue_date}</td><td>${r.stores?.name||''}</td><td>${r.items?.item_code} — ${r.items?.item_name}</td><td>${r.batch_no}</td><td>${fmt(r.qty)} ${r.items?.uom||''}</td><td>${r.issued_to||'-'}</td><td>${r.style_no||'-'}</td><td>${r.order_ref||'-'}</td></tr>`).join('')}
       </table></div>
     </div>`;
 }
 async function submitIssue(ev){
   ev.preventDefault();
+  const deptSelect = document.getElementById('i_to').value;
+  const issuedTo = deptSelect === 'Other' ? document.getElementById('i_to_other').value.trim() : deptSelect;
   const payload = {
     issue_no: genNo('ISS'), issue_date: document.getElementById('i_date').value,
     store_id: document.getElementById('i_store').value, item_id: document.getElementById('i_item').value,
     batch_no: document.getElementById('i_batch').value, qty: parseFloat(document.getElementById('i_qty').value),
-    issued_to: document.getElementById('i_to').value, order_ref: document.getElementById('i_ref').value,
+    issued_to: issuedTo, style_no: document.getElementById('i_style').value, order_ref: document.getElementById('i_ref').value,
     created_by: CURRENT_USER.id
   };
   const { error } = await sb.from('issues').insert(payload);
@@ -502,21 +548,28 @@ async function runLedger(){
   rows.forEach(r=>{
     const k = key(r);
     if(!summary[k]) summary[k] = {
-      store: r.stores?.name, item_code: r.items?.item_code, item_name: r.items?.item_name,
+      store: r.stores?.name, item_id: r.item_id, item_code: r.items?.item_code, item_name: r.items?.item_name,
       uom: r.items?.uom, batch: r.batch_no, in: 0, out: 0
     };
     summary[k].in += Number(r.in_qty||0);
     summary[k].out += Number(r.out_qty||0);
   });
-  const summaryRows = Object.entries(summary).map(([k,v])=>({
-    ...v, opening: opening[k]||0, closing: (opening[k]||0)+v.in-v.out
-  })).sort((a,b)=> a.item_name.localeCompare(b.item_name));
+  const summaryRows = Object.entries(summary).map(([k,v])=>{
+    const cost = ITEMS.find(i=>i.id===v.item_id)?.standard_cost || 0;
+    const openingQty = opening[k]||0;
+    const closingQty = openingQty+v.in-v.out;
+    return {
+      ...v, opening: openingQty, closing: closingQty, cost,
+      openingAmt: openingQty*cost, inAmt: v.in*cost, outAmt: v.out*cost, closingAmt: closingQty*cost
+    };
+  }).sort((a,b)=> a.item_name.localeCompare(b.item_name));
 
   window._ledgerSummary = summaryRows;
   window._ledgerDetail = rows.sort((a,b)=> a.move_date.localeCompare(b.move_date));
 
   const totalIn = summaryRows.reduce((a,b)=>a+b.in,0);
   const totalOut = summaryRows.reduce((a,b)=>a+b.out,0);
+  const totalClosingAmt = summaryRows.reduce((a,b)=>a+b.closingAmt,0);
 
   document.getElementById('ledgerResult').innerHTML = `
     <div class="toolbar">
@@ -528,14 +581,16 @@ async function runLedger(){
     </div>
     <div class="grid" style="margin-bottom:16px;">
       <div class="stat"><div class="num">${summaryRows.length}</div><div class="lbl">Item-batches moved</div></div>
-      <div class="stat"><div class="num">${fmt(totalIn)}</div><div class="lbl">Total In</div></div>
-      <div class="stat"><div class="num">${fmt(totalOut)}</div><div class="lbl">Total Out</div></div>
+      <div class="stat"><div class="num">${fmt(totalIn)}</div><div class="lbl">Total In (qty)</div></div>
+      <div class="stat"><div class="num">${fmt(totalOut)}</div><div class="lbl">Total Out (qty)</div></div>
+      <div class="stat"><div class="num">৳${fmt(totalClosingAmt)}</div><div class="lbl">Total Closing Value</div></div>
     </div>
-    <h3 style="font-size:14px;color:var(--navy);">Summary (Opening / In / Out / Closing)</h3>
+    <h3 style="font-size:14px;color:var(--navy);">Summary (Opening / In / Out / Closing — Qty &amp; Value)</h3>
+    <p class="muted">Value columns use each item's Standard Cost (set on the Items tab). Update standard cost there for accurate valuation.</p>
     <div class="tablewrap">
       <table>
-        <tr><th>Store</th><th>Item</th><th>Batch</th><th>Opening</th><th>In</th><th>Out</th><th>Closing</th></tr>
-        ${summaryRows.map(r=>`<tr><td>${r.store}</td><td>${r.item_code} — ${r.item_name}</td><td>${r.batch}</td><td>${fmt(r.opening)}</td><td>${fmt(r.in)}</td><td>${fmt(r.out)}</td><td><b>${fmt(r.closing)}</b> ${r.uom}</td></tr>`).join('')}
+        <tr><th>Store</th><th>Item</th><th>Batch</th><th>Opening Qty</th><th>In Qty</th><th>Out Qty</th><th>Closing Qty</th><th>Opening Amt</th><th>In Amt</th><th>Out Amt</th><th>Closing Amt</th></tr>
+        ${summaryRows.map(r=>`<tr><td>${r.store}</td><td>${r.item_code} — ${r.item_name}</td><td>${r.batch}</td><td>${fmt(r.opening)}</td><td>${fmt(r.in)}</td><td>${fmt(r.out)}</td><td><b>${fmt(r.closing)}</b> ${r.uom}</td><td>৳${fmt(r.openingAmt)}</td><td>৳${fmt(r.inAmt)}</td><td>৳${fmt(r.outAmt)}</td><td><b>৳${fmt(r.closingAmt)}</b></td></tr>`).join('')}
       </table>
     </div>
     <h3 style="font-size:14px;color:var(--navy);margin-top:20px;">Detailed Transactions</h3>
@@ -550,7 +605,8 @@ function exportLedgerExcel(){
   const wb = XLSX.utils.book_new();
   const wsSummary = XLSX.utils.json_to_sheet((window._ledgerSummary||[]).map(r=>({
     Store:r.store, ItemCode:r.item_code, ItemName:r.item_name, Batch:r.batch, UOM:r.uom,
-    Opening:r.opening, In:r.in, Out:r.out, Closing:r.closing
+    OpeningQty:r.opening, InQty:r.in, OutQty:r.out, ClosingQty:r.closing,
+    UnitCost:r.cost, OpeningAmt:r.openingAmt, InAmt:r.inAmt, OutAmt:r.outAmt, ClosingAmt:r.closingAmt
   })));
   XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary');
   const wsDetail = XLSX.utils.json_to_sheet((window._ledgerDetail||[]).map(r=>({
@@ -570,9 +626,9 @@ function exportLedgerPDF(){
 
   doc.autoTable({
     startY: 28,
-    head: [['Store','Item Code','Item Name','Batch','Opening','In','Out','Closing']],
-    body: (window._ledgerSummary||[]).map(r=>[r.store,r.item_code,r.item_name,r.batch,fmt(r.opening),fmt(r.in),fmt(r.out),fmt(r.closing)+' '+r.uom]),
-    headStyles:{fillColor:[31,59,77]}, styles:{fontSize:8},
+    head: [['Store','Item','Batch','Opening Qty','In Qty','Out Qty','Closing Qty','Opening Amt','In Amt','Out Amt','Closing Amt']],
+    body: (window._ledgerSummary||[]).map(r=>[r.store,`${r.item_code} ${r.item_name}`,r.batch,fmt(r.opening),fmt(r.in),fmt(r.out),fmt(r.closing)+' '+r.uom,fmt(r.openingAmt),fmt(r.inAmt),fmt(r.outAmt),fmt(r.closingAmt)]),
+    headStyles:{fillColor:[31,59,77]}, styles:{fontSize:7.5},
     margin:{left:14,right:14}
   });
   const y2 = doc.lastAutoTable.finalY + 10;
@@ -622,15 +678,19 @@ async function runStockCard(){
   const dates = Object.keys(byDate).sort();
 
   let running = openingBalance;
+  const cost = item.standard_cost || 0;
   const cardRows = dates.map(d=>{
     const day = byDate[d];
     const opening = running;
     const closing = opening + day.in - day.out;
     running = closing;
-    return { date:d, opening, in:day.in, out:day.out, closing, refs: day.refs.join(', ') };
+    return {
+      date:d, opening, in:day.in, out:day.out, closing, refs: day.refs.join(', '),
+      openingAmt: opening*cost, inAmt: day.in*cost, outAmt: day.out*cost, closingAmt: closing*cost
+    };
   });
   window._stockCard = cardRows;
-  window._stockCardMeta = { item, storeFilter, from, to, openingBalance };
+  window._stockCardMeta = { item, storeFilter, from, to, openingBalance, cost };
 
   resultEl.innerHTML = `
     <div class="toolbar">
@@ -640,19 +700,21 @@ async function runStockCard(){
         <button class="btn ghost" onclick="exportStockCardExcel()">Export Excel</button>
       </div>
     </div>
-    <p class="muted">${storeFilter? STORES.find(s=>s.id===storeFilter)?.name : 'All Stores combined'} — Opening balance on ${from}: <b>${fmt(openingBalance)} ${item.uom}</b></p>
-    ${cardRows.length===0 ? `<p class="muted">No movement between ${from} and ${to}. Balance stayed at ${fmt(openingBalance)} ${item.uom}.</p>` : `
+    <p class="muted">${storeFilter? STORES.find(s=>s.id===storeFilter)?.name : 'All Stores combined'} — Opening balance on ${from}: <b>${fmt(openingBalance)} ${item.uom}</b> (Standard Cost: ৳${fmt(cost)}/${item.uom})</p>
+    ${cardRows.length===0 ? `<p class="muted">No movement between ${from} and ${to}. Balance stayed at ${fmt(openingBalance)} ${item.uom} (৳${fmt(openingBalance*cost)}).</p>` : `
     <div class="tablewrap">
       <table>
-        <tr><th>Date</th><th>Opening</th><th>Received (In)</th><th>Issued (Out)</th><th>Closing</th><th>Reference</th></tr>
-        ${cardRows.map(r=>`<tr><td>${r.date}</td><td>${fmt(r.opening)}</td><td>${r.in?fmt(r.in):''}</td><td>${r.out?fmt(r.out):''}</td><td><b>${fmt(r.closing)}</b></td><td class="muted">${r.refs}</td></tr>`).join('')}
+        <tr><th>Date</th><th>Opening Qty</th><th>Received</th><th>Issued</th><th>Closing Qty</th><th>Opening Amt</th><th>Received Amt</th><th>Issued Amt</th><th>Closing Amt</th><th>Reference</th></tr>
+        ${cardRows.map(r=>`<tr><td>${r.date}</td><td>${fmt(r.opening)}</td><td>${r.in?fmt(r.in):''}</td><td>${r.out?fmt(r.out):''}</td><td><b>${fmt(r.closing)}</b></td><td>৳${fmt(r.openingAmt)}</td><td>${r.inAmt?'৳'+fmt(r.inAmt):''}</td><td>${r.outAmt?'৳'+fmt(r.outAmt):''}</td><td><b>৳${fmt(r.closingAmt)}</b></td><td class="muted">${r.refs}</td></tr>`).join('')}
       </table>
     </div>`}`;
 }
 function exportStockCardExcel(){
   const meta = window._stockCardMeta;
   const ws = XLSX.utils.json_to_sheet((window._stockCard||[]).map(r=>({
-    Date:r.date, Opening:r.opening, Received:r.in, Issued:r.out, Closing:r.closing, Reference:r.refs
+    Date:r.date, OpeningQty:r.opening, ReceivedQty:r.in, IssuedQty:r.out, ClosingQty:r.closing,
+    UnitCost:meta.cost, OpeningAmt:r.openingAmt, ReceivedAmt:r.inAmt, IssuedAmt:r.outAmt, ClosingAmt:r.closingAmt,
+    Reference:r.refs
   })));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Stock Card');
@@ -661,17 +723,17 @@ function exportStockCardExcel(){
 function exportStockCardPDF(){
   const meta = window._stockCardMeta;
   const { jsPDF } = window.jspdf;
-  const doc = new jsPDF();
+  const doc = new jsPDF({orientation:'landscape'});
   doc.setFontSize(14); doc.setTextColor(31,59,77);
   doc.text('E-Trims Ltd. — Daily Stock Card', 14, 15);
   doc.setFontSize(10); doc.setTextColor(80,80,80);
   doc.text(`Item: ${meta.item.item_code} — ${meta.item.item_name}`, 14, 22);
-  doc.text(`Store: ${meta.storeFilter? STORES.find(s=>s.id===meta.storeFilter)?.name : 'All Stores'}  |  Period: ${meta.from} to ${meta.to}  |  Opening: ${fmt(meta.openingBalance)} ${meta.item.uom}`, 14, 28);
+  doc.text(`Store: ${meta.storeFilter? STORES.find(s=>s.id===meta.storeFilter)?.name : 'All Stores'}  |  Period: ${meta.from} to ${meta.to}  |  Opening: ${fmt(meta.openingBalance)} ${meta.item.uom}  |  Std Cost: ৳${fmt(meta.cost)}`, 14, 28);
   doc.autoTable({
     startY: 34,
-    head: [['Date','Opening','Received','Issued','Closing','Reference']],
-    body: (window._stockCard||[]).map(r=>[r.date, fmt(r.opening), r.in?fmt(r.in):'', r.out?fmt(r.out):'', fmt(r.closing), r.refs]),
-    headStyles:{fillColor:[31,59,77]}, styles:{fontSize:9},
+    head: [['Date','Opening Qty','Received','Issued','Closing Qty','Opening Amt','Received Amt','Issued Amt','Closing Amt']],
+    body: (window._stockCard||[]).map(r=>[r.date, fmt(r.opening), r.in?fmt(r.in):'', r.out?fmt(r.out):'', fmt(r.closing), fmt(r.openingAmt), r.inAmt?fmt(r.inAmt):'', r.outAmt?fmt(r.outAmt):'', fmt(r.closingAmt)]),
+    headStyles:{fillColor:[31,59,77]}, styles:{fontSize:8},
     margin:{left:14,right:14}
   });
   doc.save(`Stock_Card_${meta.item.item_code}_${meta.from}_to_${meta.to}.pdf`);
@@ -794,18 +856,50 @@ async function submitStore(ev){
   await loadMasters(); renderStores();
 }
 
+/* ---------------- SUPPLIERS MASTER ---------------- */
+async function renderSuppliers(){
+  const el = document.getElementById('mainArea');
+  const editable = canEdit('suppliers');
+  el.innerHTML = `
+    ${editable ? `
+    <div class="card">
+      <h2>Add Supplier</h2>
+      <form class="inline" onsubmit="submitSupplier(event)">
+        <div class="fld"><label>Supplier Name</label><input id="sup_name" required></div>
+        <div class="fld"><label>Contact (Phone / Email)</label><input id="sup_contact" placeholder="e.g. 01xxxxxxxxx"></div>
+        <div class="fld"><button class="btn" type="submit">Save Supplier</button></div>
+      </form>
+    </div>` : noEditNotice('Suppliers')}
+    <div class="card">
+      <h2>Suppliers (${SUPPLIERS.length})</h2>
+      <div class="tablewrap"><table>
+        <tr><th>Name</th><th>Contact</th></tr>
+        ${SUPPLIERS.map(s=>`<tr><td>${s.name}</td><td>${s.contact||'-'}</td></tr>`).join('')}
+      </table></div>
+    </div>`;
+}
+async function submitSupplier(ev){
+  ev.preventDefault();
+  const payload = { name: document.getElementById('sup_name').value, contact: document.getElementById('sup_contact').value };
+  const { error } = await sb.from('suppliers').insert(payload);
+  if(error){ alert('Error: '+error.message); return; }
+  await loadMasters(); renderSuppliers();
+}
+
 /* ---------------- USERS (admin only) ---------------- */
+let editingUserId = null;
 async function renderUsers(){
   const el = document.getElementById('mainArea');
   const { data: users } = await sb.from('app_users').select('*').order('created_at');
   const editable = canEdit('users');
+  editingUserId = null;
   el.innerHTML = `
     ${editable ? `
-    <div class="card">
-      <h2>Add User</h2>
+    <div class="card" id="userFormCard">
+      <h2 id="userFormTitle">Add User</h2>
       <form class="inline" onsubmit="submitUser(event)">
         <div class="fld"><label>Username</label><input id="u_user" required></div>
-        <div class="fld"><label>Password</label><input id="u_pass" required></div>
+        <div class="fld"><label>Password <span class="muted" id="u_pass_hint"></span></label><input id="u_pass"></div>
         <div class="fld"><label>Full Name</label><input id="u_name" required></div>
         <div class="fld"><label>Role</label>
           <select id="u_role">
@@ -816,25 +910,64 @@ async function renderUsers(){
             <option value="admin">Admin</option>
           </select>
         </div>
-        <div class="fld"><button class="btn" type="submit">Save User</button></div>
+        <div class="fld"><label>Active</label>
+          <select id="u_active"><option value="true">Yes</option><option value="false">No</option></select>
+        </div>
+        <div class="fld"><button class="btn" type="submit" id="u_submit_btn">Save User</button></div>
+        <div class="fld" id="u_cancel_wrap" style="display:none;"><button class="btn ghost" type="button" onclick="cancelEditUser()">Cancel</button></div>
       </form>
     </div>` : noEditNotice('Users')}
     <div class="card">
       <h2>Users</h2>
       <div class="tablewrap"><table>
-        <tr><th>Username</th><th>Full Name</th><th>Role</th><th>Active</th></tr>
-        ${(users||[]).map(u=>`<tr><td>${u.username}</td><td>${u.full_name}</td><td>${u.role}</td><td>${u.is_active?'Yes':'No'}</td></tr>`).join('')}
+        <tr><th>Username</th><th>Full Name</th><th>Role</th><th>Active</th>${editable?'<th>Actions</th>':''}</tr>
+        ${(users||[]).map(u=>`<tr><td>${u.username}</td><td>${u.full_name}</td><td>${u.role}</td><td>${u.is_active?'Yes':'No'}</td>${editable?`<td><button class="btn ghost" style="padding:5px 10px;font-size:12px;" onclick='startEditUser(${JSON.stringify(u)})'>Edit</button> <button class="btn rust" style="padding:5px 10px;font-size:12px;" onclick="deleteUser('${u.id}','${u.username}')">Delete</button></td>`:''}</tr>`).join('')}
       </table></div>
     </div>`;
+}
+function startEditUser(u){
+  editingUserId = u.id;
+  document.getElementById('userFormTitle').textContent = `Edit User — ${u.username}`;
+  document.getElementById('u_user').value = u.username;
+  document.getElementById('u_pass').value = '';
+  document.getElementById('u_pass_hint').textContent = '(leave blank to keep current password)';
+  document.getElementById('u_name').value = u.full_name;
+  document.getElementById('u_role').value = u.role;
+  document.getElementById('u_active').value = String(u.is_active);
+  document.getElementById('u_submit_btn').textContent = 'Update User';
+  document.getElementById('u_cancel_wrap').style.display = '';
+  document.getElementById('userFormCard').scrollIntoView({behavior:'smooth'});
+}
+function cancelEditUser(){
+  renderUsers();
+}
+async function deleteUser(id, username){
+  if(id === CURRENT_USER.id){ alert("You can't delete your own account while logged in."); return; }
+  if(!confirm(`Delete user "${username}"? This can't be undone.`)) return;
+  const { error } = await sb.from('app_users').delete().eq('id', id);
+  if(error){ alert('Error deleting user: '+error.message); return; }
+  renderUsers();
 }
 async function submitUser(ev){
   ev.preventDefault();
   const payload = {
-    username: document.getElementById('u_user').value, password_hash: document.getElementById('u_pass').value,
-    full_name: document.getElementById('u_name').value, role: document.getElementById('u_role').value
+    username: document.getElementById('u_user').value,
+    full_name: document.getElementById('u_name').value,
+    role: document.getElementById('u_role').value,
+    is_active: document.getElementById('u_active').value === 'true'
   };
-  const { error } = await sb.from('app_users').insert(payload);
-  if(error){ alert('Error: '+error.message); return; }
+  const pass = document.getElementById('u_pass').value;
+
+  if(editingUserId){
+    if(pass) payload.password_hash = pass;
+    const { error } = await sb.from('app_users').update(payload).eq('id', editingUserId);
+    if(error){ alert('Error: '+error.message); return; }
+  } else {
+    if(!pass){ alert('Password is required for a new user.'); return; }
+    payload.password_hash = pass;
+    const { error } = await sb.from('app_users').insert(payload);
+    if(error){ alert('Error: '+error.message); return; }
+  }
   renderUsers();
 }
 
