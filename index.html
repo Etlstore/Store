@@ -80,9 +80,14 @@ table tr:hover td{background:#faf8f4;}
   <div class="loginBox">
     <h1>E-Trims Store Management</h1>
     <p>Enam Trims Ltd. — Inventory &amp; Ledger System</p>
-    <input id="loginUser" placeholder="Username" autocomplete="username">
-    <input id="loginPass" type="password" placeholder="Password" autocomplete="current-password">
-    <button onclick="doLogin()">Sign In</button>
+    <form id="loginForm" onsubmit="event.preventDefault(); doLogin();">
+      <input id="loginUser" name="username" placeholder="Username" autocomplete="username">
+      <input id="loginPass" name="password" type="password" placeholder="Password" autocomplete="current-password">
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#5a6a72;margin-bottom:14px;">
+        <input type="checkbox" id="rememberMe" style="width:auto;margin:0;" checked> Keep me signed in on this device
+      </label>
+      <button type="submit">Sign In</button>
+    </form>
     <div class="loginErr hidden" id="loginErr">Invalid username or password.</div>
   </div>
 </div>
@@ -154,6 +159,7 @@ function noEditNotice(pageLabel){
 async function doLogin(){
   const u = document.getElementById('loginUser').value.trim();
   const p = document.getElementById('loginPass').value;
+  const remember = document.getElementById('rememberMe').checked;
   const errEl = document.getElementById('loginErr');
   errEl.classList.add('hidden');
   const { data, error } = await sb.from('app_users').select('*').eq('username', u).eq('is_active', true).limit(1);
@@ -162,17 +168,21 @@ async function doLogin(){
     return;
   }
   CURRENT_USER = data[0];
-  sessionStorage.setItem('etrims_store_user', JSON.stringify(CURRENT_USER));
+  const store = remember ? localStorage : sessionStorage;
+  store.setItem('etrims_store_user', JSON.stringify(CURRENT_USER));
+  // clear the other storage so a stale copy doesn't linger
+  (remember ? sessionStorage : localStorage).removeItem('etrims_store_user');
   enterApp();
 }
 function logout(){
   sessionStorage.removeItem('etrims_store_user');
+  localStorage.removeItem('etrims_store_user');
   CURRENT_USER = null;
   document.getElementById('app').style.display='none';
   document.getElementById('loginScreen').style.display='flex';
 }
 window.addEventListener('load', async ()=>{
-  const saved = sessionStorage.getItem('etrims_store_user');
+  const saved = localStorage.getItem('etrims_store_user') || sessionStorage.getItem('etrims_store_user');
   if(saved){ CURRENT_USER = JSON.parse(saved); await enterApp(); }
 });
 
