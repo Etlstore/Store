@@ -113,6 +113,42 @@ const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 let CURRENT_USER = null;
 let STORES = [], ITEMS = [], SUPPLIERS = [];
 let ACTIVE_TAB = "dashboard";
+let USER_PERMS = {}; // page_id -> {can_view, can_edit} for CURRENT_USER's role
+
+const PAGE_DEFS = [
+  {id:'dashboard', label:'Dashboard'},
+  {id:'grn', label:'GRN (Stock In)'},
+  {id:'issues', label:'Issue (Stock Out)'},
+  {id:'transfers', label:'Transfers'},
+  {id:'stock', label:'Stock Balance'},
+  {id:'ledger', label:'Daily / Ledger Report'},
+  {id:'items', label:'Items'},
+  {id:'stores', label:'Stores'},
+  {id:'users', label:'Users'},
+];
+const ASSIGNABLE_ROLES = ['store_manager','store_keeper','accounts','management','admin'];
+
+async function loadPermissions(){
+  if(CURRENT_USER.role === 'admin'){
+    USER_PERMS = {};
+    PAGE_DEFS.forEach(p => USER_PERMS[p.id] = {can_view:true, can_edit:true});
+    return;
+  }
+  const { data } = await sb.from('role_permissions').select('*').eq('role', CURRENT_USER.role);
+  USER_PERMS = {};
+  (data||[]).forEach(r => USER_PERMS[r.page_id] = {can_view: r.can_view, can_edit: r.can_edit});
+}
+function canView(pageId){
+  if(CURRENT_USER.role === 'admin') return true;
+  return !!(USER_PERMS[pageId] && USER_PERMS[pageId].can_view);
+}
+function canEdit(pageId){
+  if(CURRENT_USER.role === 'admin') return true;
+  return !!(USER_PERMS[pageId] && USER_PERMS[pageId].can_edit);
+}
+function noEditNotice(pageLabel){
+  return `<div class="card"><p class="muted">You have view-only access to ${pageLabel}. Ask your admin to grant edit access if you need to add entries here.</p></div>`;
+}
 
 /* ---------------- LOGIN ---------------- */
 async function doLogin(){
@@ -145,8 +181,9 @@ async function enterApp(){
   document.getElementById('app').style.display='block';
   document.getElementById('whoami').textContent = `${CURRENT_USER.full_name} (${CURRENT_USER.role})`;
   await loadMasters();
+  await loadPermissions();
   buildTabs();
-  showTab('dashboard');
+  showTab(canView('dashboard') ? 'dashboard' : (PAGE_DEFS.find(p=>canView(p.id))?.id || 'dashboard'));
 }
 
 async function loadMasters(){
@@ -158,36 +195,36 @@ async function loadMasters(){
   STORES = s.data || []; ITEMS = i.data || []; SUPPLIERS = sup.data || [];
 }
 
-/* ---------------- TABS ---------------- */
-const TABS = [
-  {id:'dashboard', label:'Dashboard', roles:['admin','store_keeper','viewer']},
-  {id:'grn', label:'GRN (Stock In)', roles:['admin','store_keeper']},
-  {id:'issues', label:'Issue (Stock Out)', roles:['admin','store_keeper']},
-  {id:'transfers', label:'Transfers', roles:['admin','store_keeper']},
-  {id:'stock', label:'Stock Balance', roles:['admin','store_keeper','viewer']},
-  {id:'ledger', label:'Daily / Ledger Report', roles:['admin','store_keeper','viewer']},
-  {id:'items', label:'Items', roles:['admin','store_keeper']},
-  {id:'stores', label:'Stores', roles:['admin']},
-  {id:'users', label:'Users', roles:['admin']},
-];
+/* ---------------- TABS (driven by role_permissions, set anytime by admin) ---------------- */
 function buildTabs(){
   const bar = document.getElementById('tabBar');
   bar.innerHTML='';
-  TABS.filter(t=>t.roles.includes(CURRENT_USER.role)).forEach(t=>{
+  PAGE_DEFS.filter(p=>canView(p.id)).forEach(p=>{
     const b = document.createElement('button');
-    b.textContent = t.label; b.id = 'tab_'+t.id;
-    b.onclick = ()=>showTab(t.id);
+    b.textContent = p.label; b.id = 'tab_'+p.id;
+    b.onclick = ()=>showTab(p.id);
     bar.appendChild(b);
   });
+  if(CURRENT_USER.role === 'admin'){
+    const b = document.createElement('button');
+    b.textContent = 'Permissions'; b.id = 'tab_permissions';
+    b.onclick = ()=>showTab('permissions');
+    bar.appendChild(b);
+  }
 }
 function showTab(id){
+  if(id !== 'permissions' && !canView(id)){
+    document.getElementById('mainArea').innerHTML = `<div class="card"><p class="muted">You don't have access to this page. Ask your admin to grant view access.</p></div>`;
+    return;
+  }
   ACTIVE_TAB = id;
   document.querySelectorAll('nav.tabs button').forEach(b=>b.classList.remove('active'));
   const btn = document.getElementById('tab_'+id); if(btn) btn.classList.add('active');
   const renderers = {
     dashboard: renderDashboard, grn: renderGRN, issues: renderIssues,
     transfers: renderTransfers, stock: renderStock, ledger: renderLedger,
-    items: renderItems, stores: renderStores, users: renderUsers
+    items: renderItems, stores: renderStores, users: renderUsers,
+    permissions: renderPermissions
   };
   (renderers[id]||renderDashboard)();
 }
@@ -238,7 +275,9 @@ async function renderDashboard(){
 async function renderGRN(){
   const el = document.getElementById('mainArea');
   const { data: recent } = await sb.from('grn').select('*,items(item_code,item_name,uom),stores(name),suppliers(name)').order('created_at',{ascending:false}).limit(30);
+  const editable = canEdit('grn');
   el.innerHTML = `
+    ${editable ? `
     <div class="card">
       <h2>New GRN — Stock In</h2>
       <form class="inline" onsubmit="submitGRN(event)">
@@ -252,7 +291,7 @@ async function renderGRN(){
         <div class="fld"><label>PO Ref</label><input id="g_po" placeholder="PO number"></div>
         <div class="fld"><button class="btn" type="submit">Save GRN</button></div>
       </form>
-    </div>
+    </div>` : noEditNotice('GRN entry')}
     <div class="card">
       <h2>Recent GRN Entries</h2>
       <div class="tablewrap"><table>
@@ -280,7 +319,9 @@ async function submitGRN(ev){
 async function renderIssues(){
   const el = document.getElementById('mainArea');
   const { data: recent } = await sb.from('issues').select('*,items(item_code,item_name,uom),stores(name)').order('created_at',{ascending:false}).limit(30);
+  const editable = canEdit('issues');
   el.innerHTML = `
+    ${editable ? `
     <div class="card">
       <h2>New Issue — Stock Out</h2>
       <form class="inline" onsubmit="submitIssue(event)">
@@ -293,7 +334,7 @@ async function renderIssues(){
         <div class="fld"><label>Order / Job Ref</label><input id="i_ref" placeholder="Buyer PO / Job card"></div>
         <div class="fld"><button class="btn" type="submit">Save Issue</button></div>
       </form>
-    </div>
+    </div>` : noEditNotice('Issue entry')}
     <div class="card">
       <h2>Recent Issue Entries</h2>
       <div class="tablewrap"><table>
@@ -321,7 +362,9 @@ async function renderTransfers(){
   const el = document.getElementById('mainArea');
   const { data: recent } = await sb.from('transfers').select('*,items(item_code,item_name,uom)').order('created_at',{ascending:false}).limit(30);
   const fromStoreName = id => STORES.find(s=>s.id===id)?.name || '';
+  const editable = canEdit('transfers');
   el.innerHTML = `
+    ${editable ? `
     <div class="card">
       <h2>New Transfer (Between Stores)</h2>
       <form class="inline" onsubmit="submitTransfer(event)">
@@ -333,7 +376,7 @@ async function renderTransfers(){
         <div class="fld"><label>To Store</label><select id="t_to" required><option value="">Select</option>${storeOptions()}</select></div>
         <div class="fld"><button class="btn" type="submit">Save Transfer</button></div>
       </form>
-    </div>
+    </div>` : noEditNotice('Transfers')}
     <div class="card">
       <h2>Recent Transfers</h2>
       <div class="tablewrap"><table>
@@ -401,16 +444,29 @@ async function renderLedger(){
   el.innerHTML = `
     <div class="card">
       <h2>Daily / Period Ledger Report</h2>
-      <form class="inline" onsubmit="event.preventDefault(); runLedger();">
+      <form class="inline" onsubmit="event.preventDefault(); ledgerReportType==='stockcard' ? runStockCard() : runLedger();">
+        <div class="fld"><label>Report Type</label>
+          <select id="l_type" onchange="toggleLedgerType()">
+            <option value="summary">Period Summary (all items)</option>
+            <option value="stockcard">Daily Stock Card (date-wise, single item)</option>
+          </select>
+        </div>
         <div class="fld"><label>From Date</label><input type="date" id="l_from" value="${todayStr()}"></div>
         <div class="fld"><label>To Date</label><input type="date" id="l_to" value="${todayStr()}"></div>
         <div class="fld"><label>Store</label><select id="l_store"><option value="">All Stores</option>${storeOptions()}</select></div>
+        <div class="fld hidden" id="l_item_fld"><label>Item</label><select id="l_item">${itemOptions()}</select></div>
         <div class="fld"><button class="btn" type="submit">Generate</button></div>
       </form>
-      <p class="muted">Generates opening / in / out / closing per item. Use Export buttons below to send manually via email or WhatsApp.</p>
+      <p class="muted">Period Summary: opening at start / total in / total out / closing at end. Daily Stock Card: opening, received, issued, and closing for <b>each date</b> in the range, for one item.</p>
     </div>
     <div class="card" id="ledgerResult"></div>`;
   runLedger();
+}
+let ledgerReportType = 'summary';
+function toggleLedgerType(){
+  ledgerReportType = document.getElementById('l_type').value;
+  document.getElementById('l_item_fld').classList.toggle('hidden', ledgerReportType!=='stockcard');
+  if(ledgerReportType==='stockcard') runStockCard(); else runLedger();
 }
 async function runLedger(){
   const from = document.getElementById('l_from').value, to = document.getElementById('l_to').value;
@@ -522,10 +578,101 @@ function exportLedgerPDF(){
   doc.save(`Store_Ledger_${document.getElementById('l_from').value}_to_${document.getElementById('l_to').value}.pdf`);
 }
 
+/* ---------------- DAILY STOCK CARD (date-wise opening/in/out/closing, single item) ---------------- */
+async function runStockCard(){
+  const from = document.getElementById('l_from').value, to = document.getElementById('l_to').value;
+  const storeFilter = document.getElementById('l_store').value;
+  const itemId = document.getElementById('l_item').value;
+  const resultEl = document.getElementById('ledgerResult');
+  resultEl.innerHTML = '<p class="muted">Loading…</p>';
+  if(!itemId){ resultEl.innerHTML = '<p class="muted">Select an item to see its daily stock card.</p>'; return; }
+
+  const item = ITEMS.find(i=>i.id===itemId);
+
+  // opening balance = net of all movement strictly before 'from'
+  let openQ = sb.from('v_daily_movement').select('*').eq('item_id', itemId).lt('move_date', from);
+  if(storeFilter) openQ = openQ.eq('store_id', storeFilter);
+  const { data: beforeMoves } = await openQ;
+  let openingBalance = (beforeMoves||[]).reduce((a,m)=> a + Number(m.in_qty||0) - Number(m.out_qty||0), 0);
+
+  // movements within range
+  let rangeQ = sb.from('v_daily_movement').select('*').eq('item_id', itemId).gte('move_date', from).lte('move_date', to);
+  if(storeFilter) rangeQ = rangeQ.eq('store_id', storeFilter);
+  const { data: rangeMoves, error } = await rangeQ;
+  if(error){ resultEl.innerHTML = `<p class="muted">Error: ${error.message}</p>`; return; }
+
+  // group by date
+  const byDate = {};
+  (rangeMoves||[]).forEach(m=>{
+    if(!byDate[m.move_date]) byDate[m.move_date] = {in:0, out:0, refs:[]};
+    byDate[m.move_date].in += Number(m.in_qty||0);
+    byDate[m.move_date].out += Number(m.out_qty||0);
+    byDate[m.move_date].refs.push(`${m.move_type} ${m.ref_no}`);
+  });
+  const dates = Object.keys(byDate).sort();
+
+  let running = openingBalance;
+  const cardRows = dates.map(d=>{
+    const day = byDate[d];
+    const opening = running;
+    const closing = opening + day.in - day.out;
+    running = closing;
+    return { date:d, opening, in:day.in, out:day.out, closing, refs: day.refs.join(', ') };
+  });
+  window._stockCard = cardRows;
+  window._stockCardMeta = { item, storeFilter, from, to, openingBalance };
+
+  resultEl.innerHTML = `
+    <div class="toolbar">
+      <h2 style="margin:0;border:none;padding:0;">Daily Stock Card — ${item.item_code} ${item.item_name}</h2>
+      <div class="actions">
+        <button class="btn ghost" onclick="exportStockCardPDF()">Export PDF</button>
+        <button class="btn ghost" onclick="exportStockCardExcel()">Export Excel</button>
+      </div>
+    </div>
+    <p class="muted">${storeFilter? STORES.find(s=>s.id===storeFilter)?.name : 'All Stores combined'} — Opening balance on ${from}: <b>${fmt(openingBalance)} ${item.uom}</b></p>
+    ${cardRows.length===0 ? `<p class="muted">No movement between ${from} and ${to}. Balance stayed at ${fmt(openingBalance)} ${item.uom}.</p>` : `
+    <div class="tablewrap">
+      <table>
+        <tr><th>Date</th><th>Opening</th><th>Received (In)</th><th>Issued (Out)</th><th>Closing</th><th>Reference</th></tr>
+        ${cardRows.map(r=>`<tr><td>${r.date}</td><td>${fmt(r.opening)}</td><td>${r.in?fmt(r.in):''}</td><td>${r.out?fmt(r.out):''}</td><td><b>${fmt(r.closing)}</b></td><td class="muted">${r.refs}</td></tr>`).join('')}
+      </table>
+    </div>`}`;
+}
+function exportStockCardExcel(){
+  const meta = window._stockCardMeta;
+  const ws = XLSX.utils.json_to_sheet((window._stockCard||[]).map(r=>({
+    Date:r.date, Opening:r.opening, Received:r.in, Issued:r.out, Closing:r.closing, Reference:r.refs
+  })));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Stock Card');
+  XLSX.writeFile(wb, `Stock_Card_${meta.item.item_code}_${meta.from}_to_${meta.to}.xlsx`);
+}
+function exportStockCardPDF(){
+  const meta = window._stockCardMeta;
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF();
+  doc.setFontSize(14); doc.setTextColor(31,59,77);
+  doc.text('E-Trims Ltd. — Daily Stock Card', 14, 15);
+  doc.setFontSize(10); doc.setTextColor(80,80,80);
+  doc.text(`Item: ${meta.item.item_code} — ${meta.item.item_name}`, 14, 22);
+  doc.text(`Store: ${meta.storeFilter? STORES.find(s=>s.id===meta.storeFilter)?.name : 'All Stores'}  |  Period: ${meta.from} to ${meta.to}  |  Opening: ${fmt(meta.openingBalance)} ${meta.item.uom}`, 14, 28);
+  doc.autoTable({
+    startY: 34,
+    head: [['Date','Opening','Received','Issued','Closing','Reference']],
+    body: (window._stockCard||[]).map(r=>[r.date, fmt(r.opening), r.in?fmt(r.in):'', r.out?fmt(r.out):'', fmt(r.closing), r.refs]),
+    headStyles:{fillColor:[31,59,77]}, styles:{fontSize:9},
+    margin:{left:14,right:14}
+  });
+  doc.save(`Stock_Card_${meta.item.item_code}_${meta.from}_to_${meta.to}.pdf`);
+}
+
 /* ---------------- ITEMS MASTER ---------------- */
 async function renderItems(){
   const el = document.getElementById('mainArea');
+  const editable = canEdit('items');
   el.innerHTML = `
+    ${editable ? `
     <div class="card">
       <h2>Add / Update Item</h2>
       <form class="inline" onsubmit="submitItem(event)">
@@ -537,7 +684,7 @@ async function renderItems(){
         <div class="fld"><label>Standard Cost</label><input type="number" id="it_cost" step="0.01" value="0"></div>
         <div class="fld"><button class="btn" type="submit">Save Item</button></div>
       </form>
-    </div>
+    </div>` : noEditNotice('Items')}
     <div class="card">
       <h2>Item Master (${ITEMS.length})</h2>
       <div class="tablewrap"><table>
@@ -562,7 +709,9 @@ async function submitItem(ev){
 /* ---------------- STORES MASTER (admin only) ---------------- */
 async function renderStores(){
   const el = document.getElementById('mainArea');
+  const editable = canEdit('stores');
   el.innerHTML = `
+    ${editable ? `
     <div class="card">
       <h2>Add Store / Location</h2>
       <form class="inline" onsubmit="submitStore(event)">
@@ -579,7 +728,7 @@ async function renderStores(){
         </div>
         <div class="fld"><button class="btn" type="submit">Save Store</button></div>
       </form>
-    </div>
+    </div>` : noEditNotice('Stores')}
     <div class="card">
       <h2>Stores (${STORES.length})</h2>
       <div class="tablewrap"><table>
@@ -600,7 +749,9 @@ async function submitStore(ev){
 async function renderUsers(){
   const el = document.getElementById('mainArea');
   const { data: users } = await sb.from('app_users').select('*').order('created_at');
+  const editable = canEdit('users');
   el.innerHTML = `
+    ${editable ? `
     <div class="card">
       <h2>Add User</h2>
       <form class="inline" onsubmit="submitUser(event)">
@@ -609,14 +760,16 @@ async function renderUsers(){
         <div class="fld"><label>Full Name</label><input id="u_name" required></div>
         <div class="fld"><label>Role</label>
           <select id="u_role">
+            <option value="store_manager">Store Manager</option>
             <option value="store_keeper">Store Keeper (entry)</option>
-            <option value="viewer">Viewer (Management/Accounts)</option>
+            <option value="accounts">Accounts</option>
+            <option value="management">Management</option>
             <option value="admin">Admin</option>
           </select>
         </div>
         <div class="fld"><button class="btn" type="submit">Save User</button></div>
       </form>
-    </div>
+    </div>` : noEditNotice('Users')}
     <div class="card">
       <h2>Users</h2>
       <div class="tablewrap"><table>
@@ -634,6 +787,63 @@ async function submitUser(ev){
   const { error } = await sb.from('app_users').insert(payload);
   if(error){ alert('Error: '+error.message); return; }
   renderUsers();
+}
+
+/* ---------------- PERMISSIONS MATRIX (admin only) ---------------- */
+async function renderPermissions(){
+  const el = document.getElementById('mainArea');
+  el.innerHTML = `<div class="card"><h2>Loading permissions…</h2></div>`;
+  const { data } = await sb.from('role_permissions').select('*');
+  const perms = {};
+  (data||[]).forEach(r => { perms[`${r.role}||${r.page_id}`] = r; });
+
+  const rolePages = PAGE_DEFS.filter(p => p.id !== 'permissions');
+
+  el.innerHTML = `
+    <div class="card">
+      <div class="toolbar">
+        <h2 style="margin:0;border:none;padding:0;">Role Permissions</h2>
+        <div class="actions"><button class="btn" onclick="savePermissions()">Save Changes</button></div>
+      </div>
+      <p class="muted">Controls what each role can see (View) and change (Edit) on every page. Admin always has full access and isn't shown here. Changes apply the next time that user logs in or refreshes.</p>
+      <div class="tablewrap">
+        <table>
+          <tr>
+            <th>Role</th>
+            ${rolePages.map(p=>`<th colspan="2" style="text-align:center;">${p.label}</th>`).join('')}
+          </tr>
+          <tr>
+            <th></th>
+            ${rolePages.map(()=>`<th style="text-align:center;font-size:11px;">View</th><th style="text-align:center;font-size:11px;">Edit</th>`).join('')}
+          </tr>
+          ${ASSIGNABLE_ROLES.filter(r=>r!=='admin').map(role=>`
+            <tr>
+              <td><b>${role.replace('_',' ')}</b></td>
+              ${rolePages.map(p=>{
+                const rec = perms[`${role}||${p.id}`] || {can_view:false, can_edit:false};
+                return `
+                  <td style="text-align:center;"><input type="checkbox" id="perm_v_${role}_${p.id}" ${rec.can_view?'checked':''} onchange="if(!this.checked) document.getElementById('perm_e_${role}_${p.id}').checked=false;"></td>
+                  <td style="text-align:center;"><input type="checkbox" id="perm_e_${role}_${p.id}" ${rec.can_edit?'checked':''} onchange="if(this.checked) document.getElementById('perm_v_${role}_${p.id}').checked=true;"></td>`;
+              }).join('')}
+            </tr>`).join('')}
+        </table>
+      </div>
+    </div>`;
+}
+async function savePermissions(){
+  const rolePages = PAGE_DEFS.filter(p => p.id !== 'permissions');
+  const rows = [];
+  ASSIGNABLE_ROLES.filter(r=>r!=='admin').forEach(role=>{
+    rolePages.forEach(p=>{
+      const v = document.getElementById(`perm_v_${role}_${p.id}`).checked;
+      const e = document.getElementById(`perm_e_${role}_${p.id}`).checked;
+      rows.push({role, page_id: p.id, can_view: v, can_edit: e});
+    });
+  });
+  const { error } = await sb.from('role_permissions').upsert(rows, {onConflict:'role,page_id'});
+  if(error){ alert('Error saving permissions: '+error.message); return; }
+  alert('Permissions saved. They will apply next time each user logs in or refreshes the page.');
+  if(CURRENT_USER.role==='admin') renderPermissions();
 }
 </script>
 </body>
