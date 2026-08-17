@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>E-Trims Store Management System</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+:root{
+  --navy:#1F3B4D; --teal:#39756A; --rust:#A65C4A; --cream:#F2EEE7;
+  --ink:#20303A; --line:#DDD5C7; --white:#FFFFFF; --danger:#B3423A; --warn:#C68A2E;
+}
+*{box-sizing:border-box;}
+body{margin:0;font-family:'Segoe UI',Arial,sans-serif;background:var(--cream);color:var(--ink);}
+.hidden{display:none !important;}
+
+/* LOGIN */
+#loginScreen{min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,var(--navy),var(--teal));}
+.loginBox{background:var(--white);padding:40px;border-radius:10px;width:340px;box-shadow:0 20px 50px rgba(0,0,0,.25);}
+.loginBox h1{font-size:20px;color:var(--navy);margin:0 0 4px;}
+.loginBox p{color:#6b7a82;font-size:13px;margin:0 0 24px;}
+.loginBox input{width:100%;padding:11px;margin-bottom:12px;border:1px solid var(--line);border-radius:6px;font-size:14px;}
+.loginBox button{width:100%;padding:12px;background:var(--navy);color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;}
+.loginBox button:hover{background:var(--teal);}
+.loginErr{color:var(--danger);font-size:13px;margin-top:8px;}
+
+/* APP SHELL */
+#app{display:none;}
+header.top{background:var(--navy);color:#fff;padding:14px 22px;display:flex;justify-content:space-between;align-items:center;}
+header.top .brand{font-weight:700;font-size:17px;letter-spacing:.3px;}
+header.top .brand span{color:#E8B89B;}
+header.top .userinfo{font-size:13px;display:flex;align-items:center;gap:14px;}
+header.top button{background:var(--rust);color:#fff;border:none;padding:7px 14px;border-radius:5px;cursor:pointer;font-size:13px;}
+
+nav.tabs{background:#fff;border-bottom:1px solid var(--line);display:flex;gap:2px;padding:0 16px;overflow-x:auto;}
+nav.tabs button{padding:13px 16px;border:none;background:none;cursor:pointer;font-size:13.5px;color:#5a6a72;border-bottom:3px solid transparent;white-space:nowrap;}
+nav.tabs button.active{color:var(--navy);border-bottom-color:var(--rust);font-weight:600;}
+nav.tabs button:hover{color:var(--navy);}
+
+main{padding:22px;max-width:1300px;margin:0 auto;}
+.card{background:#fff;border-radius:8px;padding:20px;margin-bottom:18px;box-shadow:0 1px 3px rgba(0,0,0,.06);}
+.card h2{margin:0 0 14px;font-size:17px;color:var(--navy);border-bottom:2px solid var(--cream);padding-bottom:10px;}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;}
+.stat{background:var(--cream);border-radius:8px;padding:16px;border-left:4px solid var(--teal);}
+.stat.warn{border-left-color:var(--warn);}
+.stat .num{font-size:26px;font-weight:700;color:var(--navy);}
+.stat .lbl{font-size:12px;color:#6b7a82;margin-top:2px;}
+
+form.inline{display:flex;flex-wrap:wrap;gap:10px;align-items:end;margin-bottom:16px;}
+form.inline .fld{display:flex;flex-direction:column;gap:4px;}
+form.inline label{font-size:11.5px;color:#6b7a82;font-weight:600;}
+input,select{padding:8px 10px;border:1px solid var(--line);border-radius:5px;font-size:13.5px;background:#fff;}
+button.btn{padding:9px 16px;background:var(--navy);color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:13.5px;font-weight:600;}
+button.btn:hover{background:var(--teal);}
+button.btn.rust{background:var(--rust);}
+button.btn.rust:hover{background:#8f4a3c;}
+button.btn.ghost{background:#fff;color:var(--navy);border:1px solid var(--navy);}
+
+table{width:100%;border-collapse:collapse;font-size:13px;}
+table th{background:var(--navy);color:#fff;padding:9px 10px;text-align:left;font-weight:600;position:sticky;top:0;}
+table td{padding:8px 10px;border-bottom:1px solid var(--line);}
+table tr:hover td{background:#faf8f4;}
+.tablewrap{overflow-x:auto;max-height:520px;overflow-y:auto;}
+.badge{padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;}
+.badge.low{background:#FBE4E1;color:var(--danger);}
+.badge.ok{background:#E1EFEA;color:var(--teal);}
+.toolbar{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;justify-content:space-between;align-items:center;}
+.toolbar .actions{display:flex;gap:8px;}
+.muted{color:#8a97a0;font-size:12.5px;}
+.tag{background:var(--cream);padding:2px 8px;border-radius:4px;font-size:11.5px;color:var(--navy);font-weight:600;}
+</style>
+</head>
+<body>
+
+<!-- ===================== LOGIN ===================== -->
+<div id="loginScreen">
+  <div class="loginBox">
+    <h1>E-Trims Store Management</h1>
+    <p>Enam Trims Ltd. — Inventory &amp; Ledger System</p>
+    <input id="loginUser" placeholder="Username" autocomplete="username">
+    <input id="loginPass" type="password" placeholder="Password" autocomplete="current-password">
+    <button onclick="doLogin()">Sign In</button>
+    <div class="loginErr hidden" id="loginErr">Invalid username or password.</div>
+  </div>
+</div>
+
+<!-- ===================== APP ===================== -->
+<div id="app">
+  <header class="top">
+    <div class="brand">E-TRIMS <span>STORE</span></div>
+    <div class="userinfo">
+      <span id="whoami"></span>
+      <button onclick="logout()">Log out</button>
+    </div>
+  </header>
+
+  <nav class="tabs" id="tabBar"></nav>
+
+  <main id="mainArea"></main>
+</div>
+
+<script>
+/* ============================================================
+   CONFIG — paste your Supabase project URL + anon key below
+   ============================================================ */
+const SUPABASE_URL = "YOUR_SUPABASE_URL";
+const SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY";
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+let CURRENT_USER = null;
+let STORES = [], ITEMS = [], SUPPLIERS = [];
+let ACTIVE_TAB = "dashboard";
+
+/* ---------------- LOGIN ---------------- */
+async function doLogin(){
+  const u = document.getElementById('loginUser').value.trim();
+  const p = document.getElementById('loginPass').value;
+  const errEl = document.getElementById('loginErr');
+  errEl.classList.add('hidden');
+  const { data, error } = await sb.from('app_users').select('*').eq('username', u).eq('is_active', true).limit(1);
+  if(error || !data || data.length===0 || data[0].password_hash !== p){
+    errEl.classList.remove('hidden');
+    return;
+  }
+  CURRENT_USER = data[0];
+  sessionStorage.setItem('etrims_store_user', JSON.stringify(CURRENT_USER));
+  enterApp();
+}
+function logout(){
+  sessionStorage.removeItem('etrims_store_user');
+  CURRENT_USER = null;
+  document.getElementById('app').style.display='none';
+  document.getElementById('loginScreen').style.display='flex';
+}
+window.addEventListener('load', async ()=>{
+  const saved = sessionStorage.getItem('etrims_store_user');
+  if(saved){ CURRENT_USER = JSON.parse(saved); await enterApp(); }
+});
+
+async function enterApp(){
+  document.getElementById('loginScreen').style.display='none';
+  document.getElementById('app').style.display='block';
+  document.getElementById('whoami').textContent = `${CURRENT_USER.full_name} (${CURRENT_USER.role})`;
+  await loadMasters();
+  buildTabs();
+  showTab('dashboard');
+}
+
+async function loadMasters(){
+  const [s,i,sup] = await Promise.all([
+    sb.from('stores').select('*').eq('is_active',true).order('name'),
+    sb.from('items').select('*').eq('is_active',true).order('item_name'),
+    sb.from('suppliers').select('*').order('name')
+  ]);
+  STORES = s.data || []; ITEMS = i.data || []; SUPPLIERS = sup.data || [];
+}
+
+/* ---------------- TABS ---------------- */
+const TABS = [
+  {id:'dashboard', label:'Dashboard', roles:['admin','store_keeper','viewer']},
+  {id:'grn', label:'GRN (Stock In)', roles:['admin','store_keeper']},
+  {id:'issues', label:'Issue (Stock Out)', roles:['admin','store_keeper']},
+  {id:'transfers', label:'Transfers', roles:['admin','store_keeper']},
+  {id:'stock', label:'Stock Balance', roles:['admin','store_keeper','viewer']},
+  {id:'ledger', label:'Daily / Ledger Report', roles:['admin','store_keeper','viewer']},
+  {id:'items', label:'Items', roles:['admin','store_keeper']},
+  {id:'stores', label:'Stores', roles:['admin']},
+  {id:'users', label:'Users', roles:['admin']},
+];
+function buildTabs(){
+  const bar = document.getElementById('tabBar');
+  bar.innerHTML='';
+  TABS.filter(t=>t.roles.includes(CURRENT_USER.role)).forEach(t=>{
+    const b = document.createElement('button');
+    b.textContent = t.label; b.id = 'tab_'+t.id;
+    b.onclick = ()=>showTab(t.id);
+    bar.appendChild(b);
+  });
+}
+function showTab(id){
+  ACTIVE_TAB = id;
+  document.querySelectorAll('nav.tabs button').forEach(b=>b.classList.remove('active'));
+  const btn = document.getElementById('tab_'+id); if(btn) btn.classList.add('active');
+  const renderers = {
+    dashboard: renderDashboard, grn: renderGRN, issues: renderIssues,
+    transfers: renderTransfers, stock: renderStock, ledger: renderLedger,
+    items: renderItems, stores: renderStores, users: renderUsers
+  };
+  (renderers[id]||renderDashboard)();
+}
+
+function fmt(n){ return Number(n||0).toLocaleString('en-US',{maximumFractionDigits:2}); }
+function todayStr(){ return new Date().toISOString().slice(0,10); }
+function genNo(prefix){ return prefix + '-' + Date.now().toString().slice(-8); }
+function storeOptions(sel){ return STORES.map(s=>`<option value="${s.id}" ${sel===s.id?'selected':''}>${s.name}</option>`).join(''); }
+function itemOptions(sel){ return ITEMS.map(i=>`<option value="${i.id}" ${sel===i.id?'selected':''}>${i.item_code} — ${i.item_name}</option>`).join(''); }
+
+/* ---------------- DASHBOARD ---------------- */
+async function renderDashboard(){
+  const el = document.getElementById('mainArea');
+  el.innerHTML = `<div class="card"><h2>Loading dashboard…</h2></div>`;
+  const { data: balances } = await sb.from('v_stock_balance').select('*');
+  const rows = balances || [];
+  const totalItems = new Set(rows.map(r=>r.item_id)).size;
+  const lowStock = rows.filter(r=>r.reorder_level>0 && r.balance_qty < r.reorder_level);
+  const byStore = {};
+  STORES.forEach(s=> byStore[s.name] = rows.filter(r=>r.store_id===s.id).reduce((a,b)=>a+Number(b.balance_qty||0),0));
+
+  el.innerHTML = `
+    <div class="card">
+      <h2>Store Overview — ${new Date().toDateString()}</h2>
+      <div class="grid">
+        <div class="stat"><div class="num">${totalItems}</div><div class="lbl">Active items with stock</div></div>
+        <div class="stat ${lowStock.length?'warn':''}"><div class="num">${lowStock.length}</div><div class="lbl">Items below reorder level</div></div>
+        <div class="stat"><div class="num">${STORES.length}</div><div class="lbl">Stores tracked</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Stock by Store (total qty across items)</h2>
+      <div class="grid">
+        ${STORES.map(s=>`<div class="stat"><div class="num">${fmt(byStore[s.name]||0)}</div><div class="lbl">${s.name}</div></div>`).join('')}
+      </div>
+    </div>
+    <div class="card">
+      <h2>Low Stock Alerts</h2>
+      ${lowStock.length===0 ? '<p class="muted">No items below reorder level.</p>' : `
+      <div class="tablewrap"><table>
+        <tr><th>Item</th><th>Store</th><th>Batch</th><th>Balance</th><th>Reorder Level</th><th>Status</th></tr>
+        ${lowStock.map(r=>`<tr><td>${r.item_code} — ${r.item_name}</td><td>${r.store_name}</td><td>${r.batch_no||'-'}</td><td>${fmt(r.balance_qty)} ${r.uom}</td><td>${fmt(r.reorder_level)}</td><td><span class="badge low">LOW</span></td></tr>`).join('')}
+      </table></div>`}
+    </div>`;
+}
+
+/* ---------------- GRN (Stock In) ---------------- */
+async function renderGRN(){
+  const el = document.getElementById('mainArea');
+  const { data: recent } = await sb.from('grn').select('*,items(item_code,item_name,uom),stores(name),suppliers(name)').order('created_at',{ascending:false}).limit(30);
+  el.innerHTML = `
+    <div class="card">
+      <h2>New GRN — Stock In</h2>
+      <form class="inline" onsubmit="submitGRN(event)">
+        <div class="fld"><label>GRN Date</label><input type="date" id="g_date" value="${todayStr()}" required></div>
+        <div class="fld"><label>Store</label><select id="g_store" required><option value="">Select</option>${storeOptions()}</select></div>
+        <div class="fld"><label>Item</label><select id="g_item" required><option value="">Select</option>${itemOptions()}</select></div>
+        <div class="fld"><label>Batch / Lot No.</label><input id="g_batch" placeholder="e.g. B-2026-081" required></div>
+        <div class="fld"><label>Qty</label><input type="number" id="g_qty" step="0.01" min="0.01" required></div>
+        <div class="fld"><label>Unit Cost</label><input type="number" id="g_cost" step="0.01" value="0"></div>
+        <div class="fld"><label>Supplier</label><select id="g_supplier"><option value="">-</option>${SUPPLIERS.map(s=>`<option value="${s.id}">${s.name}</option>`).join('')}</select></div>
+        <div class="fld"><label>PO Ref</label><input id="g_po" placeholder="PO number"></div>
+        <div class="fld"><button class="btn" type="submit">Save GRN</button></div>
+      </form>
+    </div>
+    <div class="card">
+      <h2>Recent GRN Entries</h2>
+      <div class="tablewrap"><table>
+        <tr><th>GRN No.</th><th>Date</th><th>Store</th><th>Item</th><th>Batch</th><th>Qty</th><th>Supplier</th><th>PO Ref</th></tr>
+        ${(recent||[]).map(r=>`<tr><td>${r.grn_no}</td><td>${r.grn_date}</td><td>${r.stores?.name||''}</td><td>${r.items?.item_code} — ${r.items?.item_name}</td><td>${r.batch_no}</td><td>${fmt(r.qty)} ${r.items?.uom||''}</td><td>${r.suppliers?.name||'-'}</td><td>${r.po_ref||'-'}</td></tr>`).join('')}
+      </table></div>
+    </div>`;
+}
+async function submitGRN(ev){
+  ev.preventDefault();
+  const payload = {
+    grn_no: genNo('GRN'), grn_date: document.getElementById('g_date').value,
+    store_id: document.getElementById('g_store').value, item_id: document.getElementById('g_item').value,
+    batch_no: document.getElementById('g_batch').value, qty: parseFloat(document.getElementById('g_qty').value),
+    unit_cost: parseFloat(document.getElementById('g_cost').value||0),
+    supplier_id: document.getElementById('g_supplier').value || null,
+    po_ref: document.getElementById('g_po').value, created_by: CURRENT_USER.id
+  };
+  const { error } = await sb.from('grn').insert(payload);
+  if(error){ alert('Error saving GRN: '+error.message); return; }
+  renderGRN();
+}
+
+/* ---------------- ISSUES (Stock Out) ---------------- */
+async function renderIssues(){
+  const el = document.getElementById('mainArea');
+  const { data: recent } = await sb.from('issues').select('*,items(item_code,item_name,uom),stores(name)').order('created_at',{ascending:false}).limit(30);
+  el.innerHTML = `
+    <div class="card">
+      <h2>New Issue — Stock Out</h2>
+      <form class="inline" onsubmit="submitIssue(event)">
+        <div class="fld"><label>Issue Date</label><input type="date" id="i_date" value="${todayStr()}" required></div>
+        <div class="fld"><label>Store</label><select id="i_store" required><option value="">Select</option>${storeOptions()}</select></div>
+        <div class="fld"><label>Item</label><select id="i_item" required><option value="">Select</option>${itemOptions()}</select></div>
+        <div class="fld"><label>Batch / Lot No.</label><input id="i_batch" placeholder="e.g. B-2026-081" required></div>
+        <div class="fld"><label>Qty</label><input type="number" id="i_qty" step="0.01" min="0.01" required></div>
+        <div class="fld"><label>Issued To (Dept.)</label><input id="i_to" placeholder="e.g. Production - Woven"></div>
+        <div class="fld"><label>Order / Job Ref</label><input id="i_ref" placeholder="Buyer PO / Job card"></div>
+        <div class="fld"><button class="btn" type="submit">Save Issue</button></div>
+      </form>
+    </div>
+    <div class="card">
+      <h2>Recent Issue Entries</h2>
+      <div class="tablewrap"><table>
+        <tr><th>Issue No.</th><th>Date</th><th>Store</th><th>Item</th><th>Batch</th><th>Qty</th><th>Issued To</th><th>Order Ref</th></tr>
+        ${(recent||[]).map(r=>`<tr><td>${r.issue_no}</td><td>${r.issue_date}</td><td>${r.stores?.name||''}</td><td>${r.items?.item_code} — ${r.items?.item_name}</td><td>${r.batch_no}</td><td>${fmt(r.qty)} ${r.items?.uom||''}</td><td>${r.issued_to||'-'}</td><td>${r.order_ref||'-'}</td></tr>`).join('')}
+      </table></div>
+    </div>`;
+}
+async function submitIssue(ev){
+  ev.preventDefault();
+  const payload = {
+    issue_no: genNo('ISS'), issue_date: document.getElementById('i_date').value,
+    store_id: document.getElementById('i_store').value, item_id: document.getElementById('i_item').value,
+    batch_no: document.getElementById('i_batch').value, qty: parseFloat(document.getElementById('i_qty').value),
+    issued_to: document.getElementById('i_to').value, order_ref: document.getElementById('i_ref').value,
+    created_by: CURRENT_USER.id
+  };
+  const { error } = await sb.from('issues').insert(payload);
+  if(error){ alert('Error saving issue: '+error.message); return; }
+  renderIssues();
+}
+
+/* ---------------- TRANSFERS ---------------- */
+async function renderTransfers(){
+  const el = document.getElementById('mainArea');
+  const { data: recent } = await sb.from('transfers').select('*,items(item_code,item_name,uom)').order('created_at',{ascending:false}).limit(30);
+  const fromStoreName = id => STORES.find(s=>s.id===id)?.name || '';
+  el.innerHTML = `
+    <div class="card">
+      <h2>New Transfer (Between Stores)</h2>
+      <form class="inline" onsubmit="submitTransfer(event)">
+        <div class="fld"><label>Date</label><input type="date" id="t_date" value="${todayStr()}" required></div>
+        <div class="fld"><label>Item</label><select id="t_item" required><option value="">Select</option>${itemOptions()}</select></div>
+        <div class="fld"><label>Batch / Lot No.</label><input id="t_batch" required></div>
+        <div class="fld"><label>Qty</label><input type="number" id="t_qty" step="0.01" min="0.01" required></div>
+        <div class="fld"><label>From Store</label><select id="t_from" required><option value="">Select</option>${storeOptions()}</select></div>
+        <div class="fld"><label>To Store</label><select id="t_to" required><option value="">Select</option>${storeOptions()}</select></div>
+        <div class="fld"><button class="btn" type="submit">Save Transfer</button></div>
+      </form>
+    </div>
+    <div class="card">
+      <h2>Recent Transfers</h2>
+      <div class="tablewrap"><table>
+        <tr><th>Transfer No.</th><th>Date</th><th>Item</th><th>Batch</th><th>Qty</th><th>From</th><th>To</th></tr>
+        ${(recent||[]).map(r=>`<tr><td>${r.transfer_no}</td><td>${r.transfer_date}</td><td>${r.items?.item_code} — ${r.items?.item_name}</td><td>${r.batch_no}</td><td>${fmt(r.qty)} ${r.items?.uom||''}</td><td>${fromStoreName(r.from_store_id)}</td><td>${fromStoreName(r.to_store_id)}</td></tr>`).join('')}
+      </table></div>
+    </div>`;
+}
+async function submitTransfer(ev){
+  ev.preventDefault();
+  const from = document.getElementById('t_from').value, to = document.getElementById('t_to').value;
+  if(from===to){ alert('From and To store cannot be the same.'); return; }
+  const payload = {
+    transfer_no: genNo('TRF'), transfer_date: document.getElementById('t_date').value,
+    item_id: document.getElementById('t_item').value, batch_no: document.getElementById('t_batch').value,
+    qty: parseFloat(document.getElementById('t_qty').value), from_store_id: from, to_store_id: to,
+    created_by: CURRENT_USER.id
+  };
+  const { error } = await sb.from('transfers').insert(payload);
+  if(error){ alert('Error saving transfer: '+error.message); return; }
+  renderTransfers();
+}
+
+/* ---------------- STOCK BALANCE ---------------- */
+async function renderStock(){
+  const el = document.getElementById('mainArea');
+  const { data } = await sb.from('v_stock_balance').select('*').order('item_name');
+  window._stockRows = data || [];
+  el.innerHTML = `
+    <div class="card">
+      <div class="toolbar">
+        <h2 style="margin:0;border:none;padding:0;">Current Stock Balance (by Store &amp; Batch)</h2>
+        <div class="actions">
+          <select id="stockStoreFilter" onchange="filterStock()"><option value="">All Stores</option>${storeOptions()}</select>
+          <button class="btn ghost" onclick="exportStockExcel()">Export Excel</button>
+        </div>
+      </div>
+      <div class="tablewrap" id="stockTableWrap"></div>
+    </div>`;
+  filterStock();
+}
+function filterStock(){
+  const f = document.getElementById('stockStoreFilter').value;
+  const rows = (window._stockRows||[]).filter(r=> !f || r.store_id===f);
+  document.getElementById('stockTableWrap').innerHTML = `
+    <table>
+      <tr><th>Store</th><th>Item Code</th><th>Item Name</th><th>Batch</th><th>Balance Qty</th><th>UOM</th><th>Status</th></tr>
+      ${rows.map(r=>{
+        const low = r.reorder_level>0 && r.balance_qty < r.reorder_level;
+        return `<tr><td>${r.store_name}</td><td>${r.item_code}</td><td>${r.item_name}</td><td>${r.batch_no||'-'}</td><td>${fmt(r.balance_qty)}</td><td>${r.uom}</td><td><span class="badge ${low?'low':'ok'}">${low?'LOW':'OK'}</span></td></tr>`;
+      }).join('')}
+    </table>`;
+}
+function exportStockExcel(){
+  const rows = (window._stockRows||[]).map(r=>({Store:r.store_name, ItemCode:r.item_code, ItemName:r.item_name, Batch:r.batch_no, Balance:r.balance_qty, UOM:r.uom}));
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Stock Balance');
+  XLSX.writeFile(wb, `Stock_Balance_${todayStr()}.xlsx`);
+}
+
+/* ---------------- DAILY / LEDGER REPORT ---------------- */
+async function renderLedger(){
+  const el = document.getElementById('mainArea');
+  el.innerHTML = `
+    <div class="card">
+      <h2>Daily / Period Ledger Report</h2>
+      <form class="inline" onsubmit="event.preventDefault(); runLedger();">
+        <div class="fld"><label>From Date</label><input type="date" id="l_from" value="${todayStr()}"></div>
+        <div class="fld"><label>To Date</label><input type="date" id="l_to" value="${todayStr()}"></div>
+        <div class="fld"><label>Store</label><select id="l_store"><option value="">All Stores</option>${storeOptions()}</select></div>
+        <div class="fld"><button class="btn" type="submit">Generate</button></div>
+      </form>
+      <p class="muted">Generates opening / in / out / closing per item. Use Export buttons below to send manually via email or WhatsApp.</p>
+    </div>
+    <div class="card" id="ledgerResult"></div>`;
+  runLedger();
+}
+async function runLedger(){
+  const from = document.getElementById('l_from').value, to = document.getElementById('l_to').value;
+  const storeFilter = document.getElementById('l_store').value;
+  const resultEl = document.getElementById('ledgerResult');
+  resultEl.innerHTML = '<p class="muted">Loading…</p>';
+
+  let q = sb.from('v_daily_movement').select('*,items(item_code,item_name,uom),stores(name)').gte('move_date', from).lte('move_date', to);
+  const { data: moves, error } = await q;
+  if(error){ resultEl.innerHTML = `<p class="muted">Error: ${error.message}</p>`; return; }
+  let rows = moves || [];
+  if(storeFilter) rows = rows.filter(r=>r.store_id===storeFilter);
+
+  // opening balance = movement before 'from' date
+  let openMoves = (await sb.from('v_daily_movement').select('*').lt('move_date', from)).data || [];
+  if(storeFilter) openMoves = openMoves.filter(r=>r.store_id===storeFilter);
+
+  const key = r => `${r.store_id}||${r.item_id}||${r.batch_no}`;
+  const opening = {};
+  openMoves.forEach(m=>{ const k=key(m); opening[k]=(opening[k]||0)+Number(m.in_qty||0)-Number(m.out_qty||0); });
+
+  const summary = {};
+  rows.forEach(r=>{
+    const k = key(r);
+    if(!summary[k]) summary[k] = {
+      store: r.stores?.name, item_code: r.items?.item_code, item_name: r.items?.item_name,
+      uom: r.items?.uom, batch: r.batch_no, in: 0, out: 0
+    };
+    summary[k].in += Number(r.in_qty||0);
+    summary[k].out += Number(r.out_qty||0);
+  });
+  const summaryRows = Object.entries(summary).map(([k,v])=>({
+    ...v, opening: opening[k]||0, closing: (opening[k]||0)+v.in-v.out
+  })).sort((a,b)=> a.item_name.localeCompare(b.item_name));
+
+  window._ledgerSummary = summaryRows;
+  window._ledgerDetail = rows.sort((a,b)=> a.move_date.localeCompare(b.move_date));
+
+  const totalIn = summaryRows.reduce((a,b)=>a+b.in,0);
+  const totalOut = summaryRows.reduce((a,b)=>a+b.out,0);
+
+  document.getElementById('ledgerResult').innerHTML = `
+    <div class="toolbar">
+      <h2 style="margin:0;border:none;padding:0;">Ledger: ${from} to ${to} ${storeFilter? '— '+STORES.find(s=>s.id===storeFilter)?.name : '(All Stores)'}</h2>
+      <div class="actions">
+        <button class="btn ghost" onclick="exportLedgerPDF()">Export PDF</button>
+        <button class="btn ghost" onclick="exportLedgerExcel()">Export Excel</button>
+      </div>
+    </div>
+    <div class="grid" style="margin-bottom:16px;">
+      <div class="stat"><div class="num">${summaryRows.length}</div><div class="lbl">Item-batches moved</div></div>
+      <div class="stat"><div class="num">${fmt(totalIn)}</div><div class="lbl">Total In</div></div>
+      <div class="stat"><div class="num">${fmt(totalOut)}</div><div class="lbl">Total Out</div></div>
+    </div>
+    <h3 style="font-size:14px;color:var(--navy);">Summary (Opening / In / Out / Closing)</h3>
+    <div class="tablewrap">
+      <table>
+        <tr><th>Store</th><th>Item</th><th>Batch</th><th>Opening</th><th>In</th><th>Out</th><th>Closing</th></tr>
+        ${summaryRows.map(r=>`<tr><td>${r.store}</td><td>${r.item_code} — ${r.item_name}</td><td>${r.batch}</td><td>${fmt(r.opening)}</td><td>${fmt(r.in)}</td><td>${fmt(r.out)}</td><td><b>${fmt(r.closing)}</b> ${r.uom}</td></tr>`).join('')}
+      </table>
+    </div>
+    <h3 style="font-size:14px;color:var(--navy);margin-top:20px;">Detailed Transactions</h3>
+    <div class="tablewrap">
+      <table>
+        <tr><th>Date</th><th>Store</th><th>Item</th><th>Batch</th><th>Type</th><th>Ref No.</th><th>In</th><th>Out</th></tr>
+        ${window._ledgerDetail.map(r=>`<tr><td>${r.move_date}</td><td>${r.stores?.name}</td><td>${r.items?.item_code} — ${r.items?.item_name}</td><td>${r.batch_no}</td><td><span class="tag">${r.move_type}</span></td><td>${r.ref_no}</td><td>${r.in_qty?fmt(r.in_qty):''}</td><td>${r.out_qty?fmt(r.out_qty):''}</td></tr>`).join('')}
+      </table>
+    </div>`;
+}
+function exportLedgerExcel(){
+  const wb = XLSX.utils.book_new();
+  const wsSummary = XLSX.utils.json_to_sheet((window._ledgerSummary||[]).map(r=>({
+    Store:r.store, ItemCode:r.item_code, ItemName:r.item_name, Batch:r.batch, UOM:r.uom,
+    Opening:r.opening, In:r.in, Out:r.out, Closing:r.closing
+  })));
+  XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary');
+  const wsDetail = XLSX.utils.json_to_sheet((window._ledgerDetail||[]).map(r=>({
+    Date:r.move_date, Store:r.stores?.name, ItemCode:r.items?.item_code, ItemName:r.items?.item_name,
+    Batch:r.batch_no, Type:r.move_type, RefNo:r.ref_no, In:r.in_qty, Out:r.out_qty
+  })));
+  XLSX.utils.book_append_sheet(wb, wsDetail, 'Detail');
+  XLSX.writeFile(wb, `Store_Ledger_${document.getElementById('l_from').value}_to_${document.getElementById('l_to').value}.xlsx`);
+}
+function exportLedgerPDF(){
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({orientation:'landscape'});
+  doc.setFontSize(14); doc.setTextColor(31,59,77);
+  doc.text('E-Trims Ltd. — Store Ledger Report', 14, 15);
+  doc.setFontSize(10); doc.setTextColor(80,80,80);
+  doc.text(`Period: ${document.getElementById('l_from').value} to ${document.getElementById('l_to').value}`, 14, 22);
+
+  doc.autoTable({
+    startY: 28,
+    head: [['Store','Item Code','Item Name','Batch','Opening','In','Out','Closing']],
+    body: (window._ledgerSummary||[]).map(r=>[r.store,r.item_code,r.item_name,r.batch,fmt(r.opening),fmt(r.in),fmt(r.out),fmt(r.closing)+' '+r.uom]),
+    headStyles:{fillColor:[31,59,77]}, styles:{fontSize:8},
+    margin:{left:14,right:14}
+  });
+  const y2 = doc.lastAutoTable.finalY + 10;
+  doc.setFontSize(11); doc.setTextColor(31,59,77);
+  doc.text('Detailed Transactions', 14, y2);
+  doc.autoTable({
+    startY: y2+4,
+    head: [['Date','Store','Item','Batch','Type','Ref No.','In','Out']],
+    body: (window._ledgerDetail||[]).map(r=>[r.move_date, r.stores?.name, `${r.items?.item_code} — ${r.items?.item_name}`, r.batch_no, r.move_type, r.ref_no, r.in_qty?fmt(r.in_qty):'', r.out_qty?fmt(r.out_qty):'']),
+    headStyles:{fillColor:[57,117,106]}, styles:{fontSize:7.5},
+    margin:{left:14,right:14}
+  });
+  doc.save(`Store_Ledger_${document.getElementById('l_from').value}_to_${document.getElementById('l_to').value}.pdf`);
+}
+
+/* ---------------- ITEMS MASTER ---------------- */
+async function renderItems(){
+  const el = document.getElementById('mainArea');
+  el.innerHTML = `
+    <div class="card">
+      <h2>Add / Update Item</h2>
+      <form class="inline" onsubmit="submitItem(event)">
+        <div class="fld"><label>Item Code</label><input id="it_code" required></div>
+        <div class="fld"><label>Item Name</label><input id="it_name" required></div>
+        <div class="fld"><label>Category</label><input id="it_cat" placeholder="Woven Label, Adhesive..."></div>
+        <div class="fld"><label>UOM</label><input id="it_uom" placeholder="pcs / roll / meter / kg" required></div>
+        <div class="fld"><label>Reorder Level</label><input type="number" id="it_reorder" step="0.01" value="0"></div>
+        <div class="fld"><label>Standard Cost</label><input type="number" id="it_cost" step="0.01" value="0"></div>
+        <div class="fld"><button class="btn" type="submit">Save Item</button></div>
+      </form>
+    </div>
+    <div class="card">
+      <h2>Item Master (${ITEMS.length})</h2>
+      <div class="tablewrap"><table>
+        <tr><th>Code</th><th>Name</th><th>Category</th><th>UOM</th><th>Reorder Level</th><th>Std. Cost</th></tr>
+        ${ITEMS.map(i=>`<tr><td>${i.item_code}</td><td>${i.item_name}</td><td>${i.category||'-'}</td><td>${i.uom}</td><td>${fmt(i.reorder_level)}</td><td>${fmt(i.standard_cost)}</td></tr>`).join('')}
+      </table></div>
+    </div>`;
+}
+async function submitItem(ev){
+  ev.preventDefault();
+  const payload = {
+    item_code: document.getElementById('it_code').value, item_name: document.getElementById('it_name').value,
+    category: document.getElementById('it_cat').value, uom: document.getElementById('it_uom').value,
+    reorder_level: parseFloat(document.getElementById('it_reorder').value||0),
+    standard_cost: parseFloat(document.getElementById('it_cost').value||0)
+  };
+  const { error } = await sb.from('items').insert(payload);
+  if(error){ alert('Error: '+error.message); return; }
+  await loadMasters(); renderItems();
+}
+
+/* ---------------- STORES MASTER (admin only) ---------------- */
+async function renderStores(){
+  const el = document.getElementById('mainArea');
+  el.innerHTML = `
+    <div class="card">
+      <h2>Add Store / Location</h2>
+      <form class="inline" onsubmit="submitStore(event)">
+        <div class="fld"><label>Store Name</label><input id="st_name" required></div>
+        <div class="fld"><label>Code</label><input id="st_code" required></div>
+        <div class="fld"><label>Type</label>
+          <select id="st_type">
+            <option value="raw_material">Raw Material</option>
+            <option value="wip">WIP</option>
+            <option value="finished_goods">Finished Goods</option>
+            <option value="consumables">Consumables</option>
+            <option value="rejected">Rejected / Quarantine</option>
+          </select>
+        </div>
+        <div class="fld"><button class="btn" type="submit">Save Store</button></div>
+      </form>
+    </div>
+    <div class="card">
+      <h2>Stores (${STORES.length})</h2>
+      <div class="tablewrap"><table>
+        <tr><th>Name</th><th>Code</th><th>Type</th></tr>
+        ${STORES.map(s=>`<tr><td>${s.name}</td><td>${s.code}</td><td>${s.type}</td></tr>`).join('')}
+      </table></div>
+    </div>`;
+}
+async function submitStore(ev){
+  ev.preventDefault();
+  const payload = { name: document.getElementById('st_name').value, code: document.getElementById('st_code').value, type: document.getElementById('st_type').value };
+  const { error } = await sb.from('stores').insert(payload);
+  if(error){ alert('Error: '+error.message); return; }
+  await loadMasters(); renderStores();
+}
+
+/* ---------------- USERS (admin only) ---------------- */
+async function renderUsers(){
+  const el = document.getElementById('mainArea');
+  const { data: users } = await sb.from('app_users').select('*').order('created_at');
+  el.innerHTML = `
+    <div class="card">
+      <h2>Add User</h2>
+      <form class="inline" onsubmit="submitUser(event)">
+        <div class="fld"><label>Username</label><input id="u_user" required></div>
+        <div class="fld"><label>Password</label><input id="u_pass" required></div>
+        <div class="fld"><label>Full Name</label><input id="u_name" required></div>
+        <div class="fld"><label>Role</label>
+          <select id="u_role">
+            <option value="store_keeper">Store Keeper (entry)</option>
+            <option value="viewer">Viewer (Management/Accounts)</option>
+            <option value="admin">Admin</option>
+          </select>
+        </div>
+        <div class="fld"><button class="btn" type="submit">Save User</button></div>
+      </form>
+    </div>
+    <div class="card">
+      <h2>Users</h2>
+      <div class="tablewrap"><table>
+        <tr><th>Username</th><th>Full Name</th><th>Role</th><th>Active</th></tr>
+        ${(users||[]).map(u=>`<tr><td>${u.username}</td><td>${u.full_name}</td><td>${u.role}</td><td>${u.is_active?'Yes':'No'}</td></tr>`).join('')}
+      </table></div>
+    </div>`;
+}
+async function submitUser(ev){
+  ev.preventDefault();
+  const payload = {
+    username: document.getElementById('u_user').value, password_hash: document.getElementById('u_pass').value,
+    full_name: document.getElementById('u_name').value, role: document.getElementById('u_role').value
+  };
+  const { error } = await sb.from('app_users').insert(payload);
+  if(error){ alert('Error: '+error.message); return; }
+  renderUsers();
+}
+</script>
+</body>
+</html>
