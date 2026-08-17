@@ -688,7 +688,24 @@ async function renderItems(){
       <form class="inline" onsubmit="submitItem(event)">
         <div class="fld"><label>Item Code</label><input id="it_code" required></div>
         <div class="fld"><label>Item Name</label><input id="it_name" required></div>
-        <div class="fld"><label>Category</label><input id="it_cat" placeholder="Woven Label, Adhesive..."></div>
+        <div class="fld"><label>Category</label>
+          <select id="it_cat" onchange="document.getElementById('it_cat_other').classList.toggle('hidden', this.value!=='Other')">
+            <option value="Woven Label">Woven Label</option>
+            <option value="Care Label">Care Label</option>
+            <option value="Adhesive Label">Adhesive Label</option>
+            <option value="Patch">Patch</option>
+            <option value="Packaging">Packaging</option>
+            <option value="Heat Transfer">Heat Transfer</option>
+            <option value="Thermal Printing">Thermal Printing</option>
+            <option value="Screen Print">Screen Print</option>
+            <option value="Digital Print">Digital Print</option>
+            <option value="Hangtag">Hangtag</option>
+            <option value="Sticker">Sticker</option>
+            <option value="Consumable">Consumable</option>
+            <option value="Other">Other (type below)</option>
+          </select>
+          <input id="it_cat_other" placeholder="Type category" class="hidden" style="margin-top:6px;">
+        </div>
         <div class="fld"><label>UOM</label><input id="it_uom" placeholder="pcs / roll / meter / kg" required></div>
         <div class="fld"><label>Reorder Level</label><input type="number" id="it_reorder" step="0.01" value="0"></div>
         <div class="fld"><label>Standard Cost</label><input type="number" id="it_cost" step="0.01" value="0"></div>
@@ -705,9 +722,11 @@ async function renderItems(){
 }
 async function submitItem(ev){
   ev.preventDefault();
+  const catSelect = document.getElementById('it_cat').value;
+  const category = catSelect === 'Other' ? document.getElementById('it_cat_other').value.trim() : catSelect;
   const payload = {
     item_code: document.getElementById('it_code').value, item_name: document.getElementById('it_name').value,
-    category: document.getElementById('it_cat').value, uom: document.getElementById('it_uom').value,
+    category: category, uom: document.getElementById('it_uom').value,
     reorder_level: parseFloat(document.getElementById('it_reorder').value||0),
     standard_cost: parseFloat(document.getElementById('it_cost').value||0)
   };
