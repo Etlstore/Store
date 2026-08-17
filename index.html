@@ -706,7 +706,25 @@ async function renderItems(){
           </select>
           <input id="it_cat_other" placeholder="Type category" class="hidden" style="margin-top:6px;">
         </div>
-        <div class="fld"><label>UOM</label><input id="it_uom" placeholder="pcs / roll / meter / kg" required></div>
+        <div class="fld"><label>UOM</label>
+          <select id="it_uom" onchange="document.getElementById('it_uom_other').classList.toggle('hidden', this.value!=='Other')" required>
+            <option value="">Select</option>
+            <option value="pcs">pcs</option>
+            <option value="roll">roll</option>
+            <option value="meter">meter</option>
+            <option value="yard">yard</option>
+            <option value="kg">kg</option>
+            <option value="gram">gram</option>
+            <option value="dozen">dozen</option>
+            <option value="set">set</option>
+            <option value="box">box</option>
+            <option value="carton">carton</option>
+            <option value="ream">ream</option>
+            <option value="liter">liter</option>
+            <option value="Other">Other (type below)</option>
+          </select>
+          <input id="it_uom_other" placeholder="Type unit" class="hidden" style="margin-top:6px;">
+        </div>
         <div class="fld"><label>Reorder Level</label><input type="number" id="it_reorder" step="0.01" value="0"></div>
         <div class="fld"><label>Standard Cost</label><input type="number" id="it_cost" step="0.01" value="0"></div>
         <div class="fld"><button class="btn" type="submit">Save Item</button></div>
@@ -724,9 +742,11 @@ async function submitItem(ev){
   ev.preventDefault();
   const catSelect = document.getElementById('it_cat').value;
   const category = catSelect === 'Other' ? document.getElementById('it_cat_other').value.trim() : catSelect;
+  const uomSelect = document.getElementById('it_uom').value;
+  const uom = uomSelect === 'Other' ? document.getElementById('it_uom_other').value.trim() : uomSelect;
   const payload = {
     item_code: document.getElementById('it_code').value, item_name: document.getElementById('it_name').value,
-    category: category, uom: document.getElementById('it_uom').value,
+    category: category, uom: uom,
     reorder_level: parseFloat(document.getElementById('it_reorder').value||0),
     standard_cost: parseFloat(document.getElementById('it_cost').value||0)
   };
