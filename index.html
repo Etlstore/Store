@@ -633,11 +633,12 @@ async function runLedger(){
   const resultEl = document.getElementById('ledgerResult');
   resultEl.innerHTML = '<p class="muted">Loading…</p>';
 
-  let q = sb.from('v_daily_movement').select('*,items(item_code,item_name,uom),stores(name)').gte('move_date', from).lte('move_date', to);
+  let q = sb.from('v_daily_movement').select('*').gte('move_date', from).lte('move_date', to);
   const { data: moves, error } = await q;
   if(error){ resultEl.innerHTML = `<p class="muted">Error: ${error.message}</p>`; return; }
   let rows = moves || [];
   if(storeFilter) rows = rows.filter(r=>r.store_id===storeFilter);
+  rows.forEach(r=>{ r.items = ITEMS.find(i=>i.id===r.item_id); r.stores = STORES.find(s=>s.id===r.store_id); });
 
   // opening balance = movement before 'from' date
   let openMoves = (await sb.from('v_daily_movement').select('*').lt('move_date', from)).data || [];
