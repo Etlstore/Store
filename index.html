@@ -158,6 +158,9 @@ function noEditNotice(pageLabel){
 function isAdmin(){
   return CURRENT_USER.role === 'admin';
 }
+function canSeeValue(){
+  return ['admin','accounts','management'].includes(CURRENT_USER.role);
+}
 
 /* ---------------- LOGIN ---------------- */
 async function doLogin(){
@@ -669,11 +672,15 @@ async function runLedger(){
   }).sort((a,b)=> a.item_name.localeCompare(b.item_name));
 
   window._ledgerSummary = summaryRows;
-  window._ledgerDetail = rows.sort((a,b)=> a.move_date.localeCompare(b.move_date));
+  window._ledgerDetail = rows.sort((a,b)=> a.move_date.localeCompare(b.move_date)).map(r=>{
+    const cost = ITEMS.find(i=>i.id===r.item_id)?.standard_cost || 0;
+    return { ...r, inAmt: Number(r.in_qty||0)*cost, outAmt: Number(r.out_qty||0)*cost };
+  });
 
   const totalIn = summaryRows.reduce((a,b)=>a+b.in,0);
   const totalOut = summaryRows.reduce((a,b)=>a+b.out,0);
   const totalClosingAmt = summaryRows.reduce((a,b)=>a+b.closingAmt,0);
+  const showValue = canSeeValue();
 
   document.getElementById('ledgerResult').innerHTML = `
     <div class="toolbar">
@@ -687,40 +694,43 @@ async function runLedger(){
       <div class="stat"><div class="num">${summaryRows.length}</div><div class="lbl">Item-batches moved</div></div>
       <div class="stat"><div class="num">${fmt(totalIn)}</div><div class="lbl">Total In (qty)</div></div>
       <div class="stat"><div class="num">${fmt(totalOut)}</div><div class="lbl">Total Out (qty)</div></div>
-      <div class="stat"><div class="num">৳${fmt(totalClosingAmt)}</div><div class="lbl">Total Closing Value</div></div>
+      ${showValue ? `<div class="stat"><div class="num">৳${fmt(totalClosingAmt)}</div><div class="lbl">Total Closing Value</div></div>` : ''}
     </div>
-    <h3 style="font-size:14px;color:var(--navy);">Summary (Opening / In / Out / Closing — Qty &amp; Value)</h3>
-    <p class="muted">Value columns use each item's Standard Cost (set on the Items tab). Update standard cost there for accurate valuation.</p>
+    <h3 style="font-size:14px;color:var(--navy);">Summary (Opening / In / Out / Closing${showValue?' — Qty &amp; Value':' Qty'})</h3>
+    ${showValue ? `<p class="muted">Value columns use each item's Standard Cost (set on the Items tab). Update standard cost there for accurate valuation.</p>` : ''}
     <div class="tablewrap">
       <table>
-        <tr><th>Store</th><th>Item</th><th>Batch</th><th>Opening Qty</th><th>In Qty</th><th>Out Qty</th><th>Closing Qty</th><th>Opening Amt</th><th>In Amt</th><th>Out Amt</th><th>Closing Amt</th></tr>
-        ${summaryRows.map(r=>`<tr><td>${r.store}</td><td>${r.item_code} — ${r.item_name}</td><td>${r.batch}</td><td>${fmt(r.opening)}</td><td>${fmt(r.in)}</td><td>${fmt(r.out)}</td><td><b>${fmt(r.closing)}</b> ${r.uom}</td><td>৳${fmt(r.openingAmt)}</td><td>৳${fmt(r.inAmt)}</td><td>৳${fmt(r.outAmt)}</td><td><b>৳${fmt(r.closingAmt)}</b></td></tr>`).join('')}
+        <tr><th>Store</th><th>Item</th><th>Batch</th><th>Opening Qty</th><th>In Qty</th><th>Out Qty</th><th>Closing Qty</th>${showValue?'<th>Opening Amt</th><th>In Amt</th><th>Out Amt</th><th>Closing Amt</th>':''}</tr>
+        ${summaryRows.map(r=>`<tr><td>${r.store}</td><td>${r.item_code} — ${r.item_name}</td><td>${r.batch}</td><td>${fmt(r.opening)}</td><td>${fmt(r.in)}</td><td>${fmt(r.out)}</td><td><b>${fmt(r.closing)}</b> ${r.uom}</td>${showValue?`<td>৳${fmt(r.openingAmt)}</td><td>৳${fmt(r.inAmt)}</td><td>৳${fmt(r.outAmt)}</td><td><b>৳${fmt(r.closingAmt)}</b></td>`:''}</tr>`).join('')}
       </table>
     </div>
     <h3 style="font-size:14px;color:var(--navy);margin-top:20px;">Detailed Transactions</h3>
     <div class="tablewrap">
       <table>
-        <tr><th>Date</th><th>Store</th><th>Item</th><th>Batch</th><th>Type</th><th>Ref No.</th><th>In</th><th>Out</th></tr>
-        ${window._ledgerDetail.map(r=>`<tr><td>${r.move_date}</td><td>${r.stores?.name}</td><td>${r.items?.item_code} — ${r.items?.item_name}</td><td>${r.batch_no}</td><td><span class="tag">${r.move_type}</span></td><td>${r.ref_no}</td><td>${r.in_qty?fmt(r.in_qty):''}</td><td>${r.out_qty?fmt(r.out_qty):''}</td></tr>`).join('')}
+        <tr><th>Date</th><th>Store</th><th>Item</th><th>Batch</th><th>Type</th><th>Ref No.</th><th>In</th><th>Out</th>${showValue?'<th>In Amt</th><th>Out Amt</th>':''}</tr>
+        ${window._ledgerDetail.map(r=>`<tr><td>${r.move_date}</td><td>${r.stores?.name}</td><td>${r.items?.item_code} — ${r.items?.item_name}</td><td>${r.batch_no}</td><td><span class="tag">${r.move_type}</span></td><td>${r.ref_no}</td><td>${r.in_qty?fmt(r.in_qty):''}</td><td>${r.out_qty?fmt(r.out_qty):''}</td>${showValue?`<td>${r.inAmt?'৳'+fmt(r.inAmt):''}</td><td>${r.outAmt?'৳'+fmt(r.outAmt):''}</td>`:''}</tr>`).join('')}
       </table>
     </div>`;
 }
 function exportLedgerExcel(){
+  const showValue = canSeeValue();
   const wb = XLSX.utils.book_new();
-  const wsSummary = XLSX.utils.json_to_sheet((window._ledgerSummary||[]).map(r=>({
-    Store:r.store, ItemCode:r.item_code, ItemName:r.item_name, Batch:r.batch, UOM:r.uom,
-    OpeningQty:r.opening, InQty:r.in, OutQty:r.out, ClosingQty:r.closing,
-    UnitCost:r.cost, OpeningAmt:r.openingAmt, InAmt:r.inAmt, OutAmt:r.outAmt, ClosingAmt:r.closingAmt
-  })));
+  const wsSummary = XLSX.utils.json_to_sheet((window._ledgerSummary||[]).map(r=>{
+    const row = { Store:r.store, ItemCode:r.item_code, ItemName:r.item_name, Batch:r.batch, UOM:r.uom, OpeningQty:r.opening, InQty:r.in, OutQty:r.out, ClosingQty:r.closing };
+    if(showValue) Object.assign(row, { UnitCost:r.cost, OpeningAmt:r.openingAmt, InAmt:r.inAmt, OutAmt:r.outAmt, ClosingAmt:r.closingAmt });
+    return row;
+  }));
   XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary');
-  const wsDetail = XLSX.utils.json_to_sheet((window._ledgerDetail||[]).map(r=>({
-    Date:r.move_date, Store:r.stores?.name, ItemCode:r.items?.item_code, ItemName:r.items?.item_name,
-    Batch:r.batch_no, Type:r.move_type, RefNo:r.ref_no, In:r.in_qty, Out:r.out_qty
-  })));
+  const wsDetail = XLSX.utils.json_to_sheet((window._ledgerDetail||[]).map(r=>{
+    const row = { Date:r.move_date, Store:r.stores?.name, ItemCode:r.items?.item_code, ItemName:r.items?.item_name, Batch:r.batch_no, Type:r.move_type, RefNo:r.ref_no, In:r.in_qty, Out:r.out_qty };
+    if(showValue) Object.assign(row, { InAmt:r.inAmt, OutAmt:r.outAmt });
+    return row;
+  }));
   XLSX.utils.book_append_sheet(wb, wsDetail, 'Detail');
   XLSX.writeFile(wb, `Store_Ledger_${document.getElementById('l_from').value}_to_${document.getElementById('l_to').value}.xlsx`);
 }
 function exportLedgerPDF(){
+  const showValue = canSeeValue();
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({orientation:'landscape'});
   doc.setFontSize(14); doc.setTextColor(31,59,77);
@@ -728,20 +738,34 @@ function exportLedgerPDF(){
   doc.setFontSize(10); doc.setTextColor(80,80,80);
   doc.text(`Period: ${document.getElementById('l_from').value} to ${document.getElementById('l_to').value}`, 14, 22);
 
+  const summaryHead = showValue
+    ? ['Store','Item','Batch','Opening Qty','In Qty','Out Qty','Closing Qty','Opening Amt','In Amt','Out Amt','Closing Amt']
+    : ['Store','Item','Batch','Opening Qty','In Qty','Out Qty','Closing Qty'];
+  const summaryBody = (window._ledgerSummary||[]).map(r=>{
+    const row = [r.store,`${r.item_code} ${r.item_name}`,r.batch,fmt(r.opening),fmt(r.in),fmt(r.out),fmt(r.closing)+' '+r.uom];
+    if(showValue) row.push(fmt(r.openingAmt),fmt(r.inAmt),fmt(r.outAmt),fmt(r.closingAmt));
+    return row;
+  });
   doc.autoTable({
     startY: 28,
-    head: [['Store','Item','Batch','Opening Qty','In Qty','Out Qty','Closing Qty','Opening Amt','In Amt','Out Amt','Closing Amt']],
-    body: (window._ledgerSummary||[]).map(r=>[r.store,`${r.item_code} ${r.item_name}`,r.batch,fmt(r.opening),fmt(r.in),fmt(r.out),fmt(r.closing)+' '+r.uom,fmt(r.openingAmt),fmt(r.inAmt),fmt(r.outAmt),fmt(r.closingAmt)]),
+    head: [summaryHead], body: summaryBody,
     headStyles:{fillColor:[31,59,77]}, styles:{fontSize:7.5},
     margin:{left:14,right:14}
   });
   const y2 = doc.lastAutoTable.finalY + 10;
   doc.setFontSize(11); doc.setTextColor(31,59,77);
   doc.text('Detailed Transactions', 14, y2);
+  const detailHead = showValue
+    ? ['Date','Store','Item','Batch','Type','Ref No.','In','Out','In Amt','Out Amt']
+    : ['Date','Store','Item','Batch','Type','Ref No.','In','Out'];
+  const detailBody = (window._ledgerDetail||[]).map(r=>{
+    const row = [r.move_date, r.stores?.name, `${r.items?.item_code} — ${r.items?.item_name}`, r.batch_no, r.move_type, r.ref_no, r.in_qty?fmt(r.in_qty):'', r.out_qty?fmt(r.out_qty):''];
+    if(showValue) row.push(r.inAmt?fmt(r.inAmt):'', r.outAmt?fmt(r.outAmt):'');
+    return row;
+  });
   doc.autoTable({
     startY: y2+4,
-    head: [['Date','Store','Item','Batch','Type','Ref No.','In','Out']],
-    body: (window._ledgerDetail||[]).map(r=>[r.move_date, r.stores?.name, `${r.items?.item_code} — ${r.items?.item_name}`, r.batch_no, r.move_type, r.ref_no, r.in_qty?fmt(r.in_qty):'', r.out_qty?fmt(r.out_qty):'']),
+    head: [detailHead], body: detailBody,
     headStyles:{fillColor:[57,117,106]}, styles:{fontSize:7.5},
     margin:{left:14,right:14}
   });
@@ -795,6 +819,7 @@ async function runStockCard(){
   });
   window._stockCard = cardRows;
   window._stockCardMeta = { item, storeFilter, from, to, openingBalance, cost };
+  const showValue = canSeeValue();
 
   resultEl.innerHTML = `
     <div class="toolbar">
@@ -804,39 +829,49 @@ async function runStockCard(){
         <button class="btn ghost" onclick="exportStockCardExcel()">Export Excel</button>
       </div>
     </div>
-    <p class="muted">${storeFilter? STORES.find(s=>s.id===storeFilter)?.name : 'All Stores combined'} — Opening balance on ${from}: <b>${fmt(openingBalance)} ${item.uom}</b> (Standard Cost: ৳${fmt(cost)}/${item.uom})</p>
-    ${cardRows.length===0 ? `<p class="muted">No movement between ${from} and ${to}. Balance stayed at ${fmt(openingBalance)} ${item.uom} (৳${fmt(openingBalance*cost)}).</p>` : `
+    <p class="muted">${storeFilter? STORES.find(s=>s.id===storeFilter)?.name : 'All Stores combined'} — Opening balance on ${from}: <b>${fmt(openingBalance)} ${item.uom}</b>${showValue?` (Standard Cost: ৳${fmt(cost)}/${item.uom})`:''}</p>
+    ${cardRows.length===0 ? `<p class="muted">No movement between ${from} and ${to}. Balance stayed at ${fmt(openingBalance)} ${item.uom}${showValue?` (৳${fmt(openingBalance*cost)})`:''}.</p>` : `
     <div class="tablewrap">
       <table>
-        <tr><th>Date</th><th>Opening Qty</th><th>Received</th><th>Issued</th><th>Closing Qty</th><th>Opening Amt</th><th>Received Amt</th><th>Issued Amt</th><th>Closing Amt</th><th>Reference</th></tr>
-        ${cardRows.map(r=>`<tr><td>${r.date}</td><td>${fmt(r.opening)}</td><td>${r.in?fmt(r.in):''}</td><td>${r.out?fmt(r.out):''}</td><td><b>${fmt(r.closing)}</b></td><td>৳${fmt(r.openingAmt)}</td><td>${r.inAmt?'৳'+fmt(r.inAmt):''}</td><td>${r.outAmt?'৳'+fmt(r.outAmt):''}</td><td><b>৳${fmt(r.closingAmt)}</b></td><td class="muted">${r.refs}</td></tr>`).join('')}
+        <tr><th>Date</th><th>Opening Qty</th><th>Received</th><th>Issued</th><th>Closing Qty</th>${showValue?'<th>Opening Amt</th><th>Received Amt</th><th>Issued Amt</th><th>Closing Amt</th>':''}<th>Reference</th></tr>
+        ${cardRows.map(r=>`<tr><td>${r.date}</td><td>${fmt(r.opening)}</td><td>${r.in?fmt(r.in):''}</td><td>${r.out?fmt(r.out):''}</td><td><b>${fmt(r.closing)}</b></td>${showValue?`<td>৳${fmt(r.openingAmt)}</td><td>${r.inAmt?'৳'+fmt(r.inAmt):''}</td><td>${r.outAmt?'৳'+fmt(r.outAmt):''}</td><td><b>৳${fmt(r.closingAmt)}</b></td>`:''}<td class="muted">${r.refs}</td></tr>`).join('')}
       </table>
     </div>`}`;
 }
 function exportStockCardExcel(){
   const meta = window._stockCardMeta;
-  const ws = XLSX.utils.json_to_sheet((window._stockCard||[]).map(r=>({
-    Date:r.date, OpeningQty:r.opening, ReceivedQty:r.in, IssuedQty:r.out, ClosingQty:r.closing,
-    UnitCost:meta.cost, OpeningAmt:r.openingAmt, ReceivedAmt:r.inAmt, IssuedAmt:r.outAmt, ClosingAmt:r.closingAmt,
-    Reference:r.refs
-  })));
+  const showValue = canSeeValue();
+  const ws = XLSX.utils.json_to_sheet((window._stockCard||[]).map(r=>{
+    const row = { Date:r.date, OpeningQty:r.opening, ReceivedQty:r.in, IssuedQty:r.out, ClosingQty:r.closing };
+    if(showValue) Object.assign(row, { UnitCost:meta.cost, OpeningAmt:r.openingAmt, ReceivedAmt:r.inAmt, IssuedAmt:r.outAmt, ClosingAmt:r.closingAmt });
+    row.Reference = r.refs;
+    return row;
+  }));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Stock Card');
   XLSX.writeFile(wb, `Stock_Card_${meta.item.item_code}_${meta.from}_to_${meta.to}.xlsx`);
 }
 function exportStockCardPDF(){
   const meta = window._stockCardMeta;
+  const showValue = canSeeValue();
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({orientation:'landscape'});
   doc.setFontSize(14); doc.setTextColor(31,59,77);
   doc.text('E-Trims Ltd. — Daily Stock Card', 14, 15);
   doc.setFontSize(10); doc.setTextColor(80,80,80);
   doc.text(`Item: ${meta.item.item_code} — ${meta.item.item_name}`, 14, 22);
-  doc.text(`Store: ${meta.storeFilter? STORES.find(s=>s.id===meta.storeFilter)?.name : 'All Stores'}  |  Period: ${meta.from} to ${meta.to}  |  Opening: ${fmt(meta.openingBalance)} ${meta.item.uom}  |  Std Cost: ৳${fmt(meta.cost)}`, 14, 28);
+  doc.text(`Store: ${meta.storeFilter? STORES.find(s=>s.id===meta.storeFilter)?.name : 'All Stores'}  |  Period: ${meta.from} to ${meta.to}  |  Opening: ${fmt(meta.openingBalance)} ${meta.item.uom}${showValue?`  |  Std Cost: ৳${fmt(meta.cost)}`:''}`, 14, 28);
+  const head = showValue
+    ? ['Date','Opening Qty','Received','Issued','Closing Qty','Opening Amt','Received Amt','Issued Amt','Closing Amt']
+    : ['Date','Opening Qty','Received','Issued','Closing Qty'];
+  const body = (window._stockCard||[]).map(r=>{
+    const row = [r.date, fmt(r.opening), r.in?fmt(r.in):'', r.out?fmt(r.out):'', fmt(r.closing)];
+    if(showValue) row.push(fmt(r.openingAmt), r.inAmt?fmt(r.inAmt):'', r.outAmt?fmt(r.outAmt):'', fmt(r.closingAmt));
+    return row;
+  });
   doc.autoTable({
     startY: 34,
-    head: [['Date','Opening Qty','Received','Issued','Closing Qty','Opening Amt','Received Amt','Issued Amt','Closing Amt']],
-    body: (window._stockCard||[]).map(r=>[r.date, fmt(r.opening), r.in?fmt(r.in):'', r.out?fmt(r.out):'', fmt(r.closing), fmt(r.openingAmt), r.inAmt?fmt(r.inAmt):'', r.outAmt?fmt(r.outAmt):'', fmt(r.closingAmt)]),
+    head: [head], body: body,
     headStyles:{fillColor:[31,59,77]}, styles:{fontSize:8},
     margin:{left:14,right:14}
   });
