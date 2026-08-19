@@ -8,6 +8,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <style>
 :root{
   --navy:#1F3B4D; --teal:#39756A; --rust:#A65C4A; --cream:#F2EEE7;
@@ -105,6 +106,17 @@ table tr:hover td{background:#faf8f4;}
   <nav class="tabs" id="tabBar"></nav>
 
   <main id="mainArea"></main>
+  <datalist id="itemsDatalist"></datalist>
+  <div id="scannerModal" class="hidden" style="position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:999;display:flex;align-items:center;justify-content:center;">
+    <div style="background:#fff;border-radius:10px;padding:20px;width:90%;max-width:420px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+        <h3 style="margin:0;color:var(--navy);font-size:16px;">Scan Item Barcode</h3>
+        <button class="btn ghost" style="padding:5px 10px;" onclick="closeScanner()">Close</button>
+      </div>
+      <div id="scannerViewport" style="width:100%;"></div>
+      <p class="muted" id="scannerStatus" style="margin-top:10px;">Point the camera at a barcode or QR code.</p>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -127,6 +139,9 @@ const PAGE_DEFS = [
   {id:'transfers', label:'Transfers'},
   {id:'stock', label:'Stock Balance'},
   {id:'ledger', label:'Daily / Ledger Report'},
+  {id:'po', label:'Purchase Orders'},
+  {id:'stockcount', label:'Stock Count'},
+  {id:'reservations', label:'Reservations'},
   {id:'items', label:'Items'},
   {id:'suppliers', label:'Suppliers'},
   {id:'stores', label:'Stores'},
@@ -158,8 +173,38 @@ function noEditNotice(pageLabel){
 function isAdmin(){
   return CURRENT_USER.role === 'admin';
 }
+function itemCost(itemId){
+  const item = ITEMS.find(i=>i.id===itemId);
+  if(!item) return 0;
+  return (item.weighted_avg_cost && item.weighted_avg_cost>0) ? item.weighted_avg_cost : (item.standard_cost || 0);
+}
 function canSeeValue(){
   return ['admin','accounts','management'].includes(CURRENT_USER.role);
+}
+async function logAudit(tableName, recordId, action, oldData, newData){
+  try{
+    await sb.from('audit_log').insert({
+      table_name: tableName, record_id: String(recordId), action,
+      changed_by: CURRENT_USER.id, changed_by_name: CURRENT_USER.full_name,
+      old_data: oldData || null, new_data: newData || null
+    });
+  }catch(e){ /* never block the main action if audit logging fails */ }
+}
+function getItemCost(itemId){
+  const item = ITEMS.find(i=>i.id===itemId);
+  if(!item) return 0;
+  return (item.weighted_avg_cost && item.weighted_avg_cost>0) ? item.weighted_avg_cost : (item.standard_cost||0);
+}
+async function recalcWeightedAvgCost(itemId){
+  if(!itemId) return;
+  const { data: grns } = await sb.from('grn').select('qty,unit_cost').eq('item_id', itemId);
+  const rows = grns || [];
+  const totalQty = rows.reduce((a,g)=>a+Number(g.qty||0),0);
+  const totalCost = rows.reduce((a,g)=>a+Number(g.qty||0)*Number(g.unit_cost||0),0);
+  const avg = totalQty>0 ? totalCost/totalQty : 0;
+  await sb.from('items').update({weighted_avg_cost: avg}).eq('id', itemId);
+  const local = ITEMS.find(i=>i.id===itemId);
+  if(local) local.weighted_avg_cost = avg;
 }
 
 /* ---------------- LOGIN ---------------- */
@@ -210,6 +255,8 @@ async function loadMasters(){
     sb.from('suppliers').select('*').order('name')
   ]);
   STORES = s.data || []; ITEMS = i.data || []; SUPPLIERS = sup.data || [];
+  const dl = document.getElementById('itemsDatalist');
+  if(dl) dl.innerHTML = ITEMS.map(i=>`<option value="${i.item_code} — ${i.item_name}">`).join('');
 }
 
 /* ---------------- TABS (driven by role_permissions, set anytime by admin) ---------------- */
@@ -240,6 +287,7 @@ function showTab(id){
   const renderers = {
     dashboard: renderDashboard, grn: renderGRN, issues: renderIssues,
     transfers: renderTransfers, stock: renderStock, ledger: renderLedger,
+    po: renderPO, stockcount: renderStockCount, reservations: renderReservations,
     items: renderItems, suppliers: renderSuppliers, stores: renderStores, users: renderUsers,
     permissions: renderPermissions
   };
@@ -251,6 +299,103 @@ function todayStr(){ return new Date().toISOString().slice(0,10); }
 function genNo(prefix){ return prefix + '-' + Date.now().toString().slice(-8); }
 function storeOptions(sel){ return STORES.map(s=>`<option value="${s.id}" ${sel===s.id?'selected':''}>${s.name}</option>`).join(''); }
 function itemOptions(sel){ return ITEMS.map(i=>`<option value="${i.id}" ${sel===i.id?'selected':''}>${i.item_code} — ${i.item_name}</option>`).join(''); }
+function searchableItemSelect(id, extraOnchange){
+  return `<input type="text" id="${id}_search" list="itemsDatalist" placeholder="Type code or name to search..." autocomplete="off" oninput="syncItemSearchInput('${id}')" style="min-width:230px;">
+    <select id="${id}" style="display:none" ${extraOnchange?`onchange="${extraOnchange}"`:''}>${itemOptions()}</select>`;
+}
+function syncItemSearchInput(id){
+  const typed = document.getElementById(id+'_search').value;
+  const match = ITEMS.find(i => `${i.item_code} — ${i.item_name}` === typed);
+  const sel = document.getElementById(id);
+  sel.value = match ? match.id : '';
+  sel.dispatchEvent(new Event('change'));
+}
+function setSearchableItemValue(id, itemId){
+  const item = ITEMS.find(i=>i.id===itemId);
+  document.getElementById(id+'_search').value = item ? `${item.item_code} — ${item.item_name}` : '';
+  const sel = document.getElementById(id);
+  sel.value = itemId;
+  sel.dispatchEvent(new Event('change'));
+}
+let scannerInstance = null;
+let scannerTargetId = null;
+function openScanner(targetId){
+  scannerTargetId = targetId;
+  document.getElementById('scannerModal').classList.remove('hidden');
+  document.getElementById('scannerStatus').textContent = 'Point the camera at a barcode or QR code.';
+  if(typeof Html5Qrcode === 'undefined'){
+    document.getElementById('scannerStatus').textContent = 'Scanner library failed to load. Check your internet connection and try again.';
+    return;
+  }
+  scannerInstance = new Html5Qrcode('scannerViewport');
+  scannerInstance.start(
+    { facingMode: 'environment' },
+    { fps: 10, qrbox: 220 },
+    (decodedText) => onScanSuccess(decodedText),
+    () => {} // ignore per-frame scan failures
+  ).catch(err=>{
+    document.getElementById('scannerStatus').textContent = 'Could not access camera: '+err+'. Check camera permissions.';
+  });
+}
+function closeScanner(){
+  document.getElementById('scannerModal').classList.add('hidden');
+  if(scannerInstance){
+    scannerInstance.stop().then(()=>scannerInstance.clear()).catch(()=>{});
+    scannerInstance = null;
+  }
+}
+function onScanSuccess(decodedText){
+  const match = ITEMS.find(i => (i.barcode && i.barcode===decodedText) || i.item_code===decodedText);
+  if(match){
+    setSearchableItemValue(scannerTargetId, match.id);
+    document.getElementById('scannerStatus').textContent = `Matched: ${match.item_code} — ${match.item_name}`;
+    setTimeout(closeScanner, 700);
+  } else {
+    document.getElementById('scannerStatus').textContent = `No item found for code "${decodedText}". Set this item's Barcode field on the Items tab, or check the code.`;
+  }
+}
+function printVoucher(type, r){
+  const title = type==='GRN' ? 'Goods Received Note' : 'Stock Issue Voucher';
+  const rows = type==='GRN' ? `
+    <tr><td>GRN No.</td><td>${r.grn_no}</td></tr>
+    <tr><td>Date</td><td>${r.grn_date}</td></tr>
+    <tr><td>Store</td><td>${r.stores?.name||''}</td></tr>
+    <tr><td>Item</td><td>${r.items?.item_code} — ${r.items?.item_name}</td></tr>
+    <tr><td>Batch/Lot</td><td>${r.batch_no}</td></tr>
+    <tr><td>Quantity</td><td>${fmt(r.qty)} ${r.items?.uom||''}</td></tr>
+    <tr><td>Supplier</td><td>${r.suppliers?.name||'-'}</td></tr>
+    <tr><td>PO Ref</td><td>${r.po_ref||'-'}</td></tr>
+  ` : `
+    <tr><td>Issue No.</td><td>${r.issue_no}</td></tr>
+    <tr><td>Date</td><td>${r.issue_date}</td></tr>
+    <tr><td>Store</td><td>${r.stores?.name||''}</td></tr>
+    <tr><td>Item</td><td>${r.items?.item_code} — ${r.items?.item_name}</td></tr>
+    <tr><td>Batch/Lot</td><td>${r.batch_no}</td></tr>
+    <tr><td>Quantity</td><td>${fmt(r.qty)} ${r.items?.uom||''}</td></tr>
+    <tr><td>Type</td><td>${r.issue_type==='wastage'?'Wastage / Scrap':'Normal Issue'}</td></tr>
+    <tr><td>Issued To</td><td>${r.issued_to||'-'}</td></tr>
+    <tr><td>Style No.</td><td>${r.style_no||'-'}</td></tr>
+    <tr><td>Order Ref</td><td>${r.order_ref||'-'}</td></tr>
+  `;
+  const w = window.open('', '_blank', 'width=700,height=900');
+  w.document.write(`<html><head><title>${title}</title>
+    <style>
+      body{font-family:Arial,sans-serif;padding:30px;color:#20303A;}
+      h1{color:#1F3B4D;border-bottom:2px solid #A65C4A;padding-bottom:10px;font-size:20px;}
+      table{width:100%;border-collapse:collapse;margin-top:20px;}
+      td{padding:8px;border-bottom:1px solid #ddd;font-size:13px;}
+      td:first-child{font-weight:600;width:180px;color:#39756A;}
+      .sig{margin-top:70px;display:flex;justify-content:space-between;}
+      .sig div{width:180px;border-top:1px solid #333;text-align:center;padding-top:6px;font-size:12px;color:#555;}
+    </style></head>
+    <body>
+      <h1>E-Trims Ltd. — ${title}</h1>
+      <table>${rows}</table>
+      <div class="sig"><div>Prepared By</div><div>Checked By</div><div>Approved By</div></div>
+      <script>window.onload=()=>window.print();<\/script>
+    </body></html>`);
+  w.document.close();
+}
 
 /* ---------------- DASHBOARD ---------------- */
 async function renderDashboard(){
@@ -290,25 +435,33 @@ async function renderDashboard(){
 
 /* ---------------- GRN (Stock In) ---------------- */
 let editingGrnId = null;
+let grnPageLimit = 30;
 async function renderGRN(){
   const el = document.getElementById('mainArea');
-  const { data: recent } = await sb.from('grn').select('*,items(item_code,item_name,uom),stores(name),suppliers(name)').order('created_at',{ascending:false}).limit(30);
+  const { data: recent } = await sb.from('grn').select('*,items(item_code,item_name,uom),stores(name),suppliers(name)').order('created_at',{ascending:false}).limit(grnPageLimit);
   const editable = canEdit('grn');
   const adminMode = isAdmin();
   editingGrnId = null;
+  window._grnRecent = recent || [];
   el.innerHTML = `
     ${editable ? `
     <div class="card" id="grnFormCard">
       <h2 id="grnFormTitle">New GRN — Stock In</h2>
       <form class="inline" onsubmit="submitGRN(event)">
         <div class="fld"><label>GRN Date</label><input type="date" id="g_date" value="${todayStr()}" required onchange="autoFillGRN()"></div>
+        <div class="fld"><label>Type</label>
+          <select id="g_type" onchange="toggleGrnType()">
+            <option value="purchase">Purchase (from supplier)</option>
+            <option value="production_return">Production Return (excess material back to store)</option>
+          </select>
+        </div>
         <div class="fld"><label>Store</label><select id="g_store" required><option value="">Select</option>${storeOptions()}</select></div>
-        <div class="fld"><label>Item</label><select id="g_item" required onchange="autoFillGRN()"><option value="">Select</option>${itemOptions()}</select></div>
+        <div class="fld"><label>Item</label>${searchableItemSelect('g_item', 'autoFillGRN()')} <button type="button" class="btn ghost" onclick="openScanner('g_item')" style="margin-left:4px;">📷 Scan</button></div>
         <div class="fld"><label>Batch / Lot No. <span class="muted">(auto, editable)</span></label><input id="g_batch" placeholder="Select an item first" required></div>
         <div class="fld"><label>Qty</label><input type="number" id="g_qty" step="0.01" min="0.01" required></div>
         <div class="fld"><label>Unit Cost <span class="muted">(auto, editable)</span></label><input type="number" id="g_cost" step="0.01" value="0"></div>
-        <div class="fld"><label>Supplier</label><select id="g_supplier"><option value="">-</option>${SUPPLIERS.map(s=>`<option value="${s.id}">${s.name}</option>`).join('')}</select></div>
-        <div class="fld"><label>PO Ref</label><input id="g_po" placeholder="PO number"></div>
+        <div class="fld" id="g_supplier_fld"><label>Supplier</label><select id="g_supplier"><option value="">-</option>${SUPPLIERS.map(s=>`<option value="${s.id}">${s.name}</option>`).join('')}</select></div>
+        <div class="fld" id="g_po_fld"><label>PO Ref</label><input id="g_po" placeholder="PO number"></div>
         <div class="fld"><button class="btn" type="submit" id="g_submit_btn">Save GRN</button></div>
         <div class="fld" id="g_cancel_wrap" style="display:none;"><button class="btn ghost" type="button" onclick="renderGRN()">Cancel</button></div>
       </form>
@@ -319,20 +472,53 @@ async function renderGRN(){
       <p class="muted">Suppliers on file: ${SUPPLIERS.length===0 ? 'none yet — add one above' : SUPPLIERS.map(s=>s.name).join(', ')}</p>
     </div>` : noEditNotice('GRN entry')}
     <div class="card">
-      <h2>Recent GRN Entries</h2>
+      <div class="toolbar">
+        <h2 style="margin:0;border:none;padding:0;">Recent GRN Entries</h2>
+        <input id="grnSearchBox" placeholder="Search item, GRN no, PO ref..." oninput="renderGrnTable()" style="min-width:220px;">
+      </div>
       ${adminMode ? '<p class="muted">As admin you can edit or delete any entry here. Store keepers can only add new entries — corrections go through you.</p>' : ''}
-      <div class="tablewrap"><table>
-        <tr><th>GRN No.</th><th>Date</th><th>Store</th><th>Item</th><th>Batch</th><th>Qty</th><th>Supplier</th><th>PO Ref</th>${adminMode?'<th>Actions</th>':''}</tr>
-        ${(recent||[]).map(r=>`<tr><td>${r.grn_no}</td><td>${r.grn_date}</td><td>${r.stores?.name||''}</td><td>${r.items?.item_code} — ${r.items?.item_name}</td><td>${r.batch_no}</td><td>${fmt(r.qty)} ${r.items?.uom||''}</td><td>${r.suppliers?.name||'-'}</td><td>${r.po_ref||'-'}</td>${adminMode?`<td><button class="btn ghost" style="padding:5px 10px;font-size:12px;" onclick='startEditGRN(${JSON.stringify(r)})'>Edit</button> <button class="btn rust" style="padding:5px 10px;font-size:12px;" onclick="deleteGRN('${r.id}','${r.grn_no}')">Delete</button></td>`:''}</tr>`).join('')}
-      </table></div>
+      <div id="grnTableWrap"></div>
+      <div style="text-align:center;margin-top:12px;">
+        <button class="btn ghost" onclick="loadMoreGRN()">Load More</button>
+      </div>
     </div>`;
+  renderGrnTable();
+}
+function renderGrnTable(){
+  const adminMode = isAdmin();
+  const search = (document.getElementById('grnSearchBox')?.value || '').toLowerCase();
+  let rows = window._grnRecent || [];
+  if(search) rows = rows.filter(r=>
+    (r.items?.item_code||'').toLowerCase().includes(search) ||
+    (r.items?.item_name||'').toLowerCase().includes(search) ||
+    (r.grn_no||'').toLowerCase().includes(search) ||
+    (r.po_ref||'').toLowerCase().includes(search) ||
+    (r.suppliers?.name||'').toLowerCase().includes(search)
+  );
+  document.getElementById('grnTableWrap').innerHTML = `
+    <div class="tablewrap"><table>
+      <tr><th>GRN No.</th><th>Date</th><th>Type</th><th>Store</th><th>Item</th><th>Batch</th><th>Qty</th><th>Supplier</th><th>PO Ref / Note</th><th>Actions</th></tr>
+      ${rows.map(r=>`<tr><td>${r.grn_no}</td><td>${r.grn_date}</td><td>${r.grn_type==='production_return'?'<span class="badge ok">Prod. Return</span>':'<span class="tag">Purchase</span>'}</td><td>${r.stores?.name||''}</td><td>${r.items?.item_code} — ${r.items?.item_name}</td><td>${r.batch_no}</td><td>${fmt(r.qty)} ${r.items?.uom||''}</td><td>${r.suppliers?.name||'-'}</td><td>${r.po_ref||'-'}</td>${adminMode?`<td><button class="btn ghost" style="padding:5px 10px;font-size:12px;" onclick='startEditGRN(${JSON.stringify(r)})'>Edit</button> <button class="btn rust" style="padding:5px 10px;font-size:12px;" onclick='deleteGRN(${JSON.stringify(r)})'>Delete</button> <button class="btn ghost" style="padding:5px 10px;font-size:12px;" onclick='printVoucher("GRN", ${JSON.stringify(r)})'>Print</button></td>`:`<td><button class="btn ghost" style="padding:5px 10px;font-size:12px;" onclick='printVoucher("GRN", ${JSON.stringify(r)})'>Print</button></td>`}</tr>`).join('')}
+    </table></div>
+    ${rows.length===0 ? '<p class="muted">No entries match.</p>' : ''}`;
+}
+function loadMoreGRN(){
+  grnPageLimit += 30;
+  renderGRN();
+}
+function toggleGrnType(){
+  const isPurchase = document.getElementById('g_type').value === 'purchase';
+  document.getElementById('g_supplier_fld').style.display = isPurchase ? '' : 'none';
+  document.getElementById('g_po_fld').querySelector('label').textContent = isPurchase ? 'PO Ref' : 'Note (which dept returned it)';
 }
 function startEditGRN(r){
   editingGrnId = r.id;
   document.getElementById('grnFormTitle').textContent = `Edit GRN — ${r.grn_no}`;
   document.getElementById('g_date').value = r.grn_date;
+  document.getElementById('g_type').value = r.grn_type || 'purchase';
+  toggleGrnType();
   document.getElementById('g_store').value = r.store_id;
-  document.getElementById('g_item').value = r.item_id;
+  setSearchableItemValue('g_item', r.item_id);
   document.getElementById('g_batch').value = r.batch_no;
   document.getElementById('g_qty').value = r.qty;
   document.getElementById('g_cost').value = r.unit_cost;
@@ -342,32 +528,42 @@ function startEditGRN(r){
   document.getElementById('g_cancel_wrap').style.display = '';
   document.getElementById('grnFormCard').scrollIntoView({behavior:'smooth'});
 }
-async function deleteGRN(id, grnNo){
-  if(!confirm(`Delete GRN "${grnNo}"? This will reduce stock balance accordingly. Can't be undone.`)) return;
-  const { error } = await sb.from('grn').delete().eq('id', id);
+async function deleteGRN(r){
+  if(!confirm(`Delete GRN "${r.grn_no}"? This will reduce stock balance accordingly. Can't be undone.`)) return;
+  const { error } = await sb.from('grn').delete().eq('id', r.id);
   if(error){ alert('Error deleting: '+error.message); return; }
+  await logAudit('grn', r.id, 'DELETE', r, null);
+  await recalcWeightedAvgCost(r.item_id);
   renderGRN();
 }
 async function submitGRN(ev){
   ev.preventDefault();
+  if(!document.getElementById('g_item').value){ alert('Please select a valid item from the list.'); return; }
+  const grnType = document.getElementById('g_type').value;
   const payload = {
     grn_date: document.getElementById('g_date').value,
     store_id: document.getElementById('g_store').value, item_id: document.getElementById('g_item').value,
     batch_no: document.getElementById('g_batch').value, qty: parseFloat(document.getElementById('g_qty').value),
     unit_cost: parseFloat(document.getElementById('g_cost').value||0),
-    supplier_id: document.getElementById('g_supplier').value || null,
-    po_ref: document.getElementById('g_po').value
+    grn_type: grnType,
+    supplier_id: grnType==='purchase' ? (document.getElementById('g_supplier').value || null) : null,
+    po_ref: grnType==='purchase' ? document.getElementById('g_po').value : (document.getElementById('g_po').value || 'Production Return')
   };
+  const itemIdForRecalc = payload.item_id;
   if(editingGrnId){
     if(!isAdmin()){ alert('Only admin can edit existing GRN entries.'); return; }
+    const oldRec = (await sb.from('grn').select('*').eq('id', editingGrnId).single()).data;
     const { error } = await sb.from('grn').update(payload).eq('id', editingGrnId);
     if(error){ alert('Error updating GRN: '+error.message); return; }
+    await logAudit('grn', editingGrnId, 'UPDATE', oldRec, payload);
   } else {
     payload.grn_no = genNo('GRN');
     payload.created_by = CURRENT_USER.id;
-    const { error } = await sb.from('grn').insert(payload);
+    const { data: inserted, error } = await sb.from('grn').insert(payload).select().single();
     if(error){ alert('Error saving GRN: '+error.message); return; }
+    await logAudit('grn', inserted?.id, 'INSERT', null, payload);
   }
+  await recalcWeightedAvgCost(itemIdForRecalc);
   renderGRN();
 }
 async function autoFillGRN(){
@@ -394,10 +590,11 @@ async function addSupplierQuick(){
 let editingIssueId = null;
 async function renderIssues(){
   const el = document.getElementById('mainArea');
-  const { data: recent } = await sb.from('issues').select('*,items(item_code,item_name,uom),stores(name)').order('created_at',{ascending:false}).limit(30);
+  const { data: recent } = await sb.from('issues').select('*,items(item_code,item_name,uom),stores(name)').order('created_at',{ascending:false}).limit(50);
   const editable = canEdit('issues');
   const adminMode = isAdmin();
   editingIssueId = null;
+  window._issuesRecent = recent || [];
   el.innerHTML = `
     ${editable ? `
     <div class="card" id="issueFormCard">
@@ -405,10 +602,17 @@ async function renderIssues(){
       <form class="inline" onsubmit="submitIssue(event)">
         <div class="fld"><label>Issue Date</label><input type="date" id="i_date" value="${todayStr()}" required></div>
         <div class="fld"><label>Store</label><select id="i_store" required><option value="">Select</option>${storeOptions()}</select></div>
-        <div class="fld"><label>Item</label><select id="i_item" required><option value="">Select</option>${itemOptions()}</select></div>
+        <div class="fld"><label>Item</label>${searchableItemSelect('i_item')} <button type="button" class="btn ghost" onclick="openScanner('i_item')" style="margin-left:4px;">📷 Scan</button></div>
         <div class="fld"><label>Batch / Lot No.</label><input id="i_batch" placeholder="e.g. B-2026-081" required></div>
         <div class="fld"><label>Qty</label><input type="number" id="i_qty" step="0.01" min="0.01" required></div>
-        <div class="fld"><label>Issued To (Department)</label>
+        <div class="fld"><label>Issue Type</label>
+          <select id="i_type" onchange="toggleIssueType()">
+            <option value="normal">Normal Issue (production use)</option>
+            <option value="wastage">Wastage / Scrap</option>
+            <option value="return_to_supplier">Return to Supplier</option>
+          </select>
+        </div>
+        <div class="fld" id="i_to_fld"><label>Issued To (Department)</label>
           <select id="i_to" onchange="document.getElementById('i_to_other').classList.toggle('hidden', this.value!=='Other')">
             <option value="Production - Woven">Production - Woven</option>
             <option value="Production - Care Label">Production - Care Label</option>
@@ -427,6 +631,9 @@ async function renderIssues(){
           </select>
           <input id="i_to_other" placeholder="Type department" class="hidden" style="margin-top:6px;">
         </div>
+        <div class="fld hidden" id="i_supplier_fld"><label>Return To Supplier</label>
+          <select id="i_supplier"><option value="">Select supplier</option>${SUPPLIERS.map(s=>`<option value="${s.id}">${s.name}</option>`).join('')}</select>
+        </div>
         <div class="fld"><label>Style No.</label><input id="i_style" placeholder="Buyer style number"></div>
         <div class="fld"><label>Order / Job Ref</label><input id="i_ref" placeholder="Buyer PO / Job card"></div>
         <div class="fld"><button class="btn" type="submit" id="i_submit_btn">Save Issue</button></div>
@@ -434,76 +641,123 @@ async function renderIssues(){
       </form>
     </div>` : noEditNotice('Issue entry')}
     <div class="card">
-      <h2>Recent Issue Entries</h2>
+      <div class="toolbar">
+        <h2 style="margin:0;border:none;padding:0;">Recent Issue Entries</h2>
+        <div class="actions">
+          <select id="issueTypeFilter" onchange="renderIssuesTable()"><option value="">All Types</option><option value="normal">Normal Only</option><option value="wastage">Wastage Only</option><option value="return_to_supplier">Returns Only</option></select>
+          <input id="issueSearchBox" placeholder="Search item, ref, dept..." oninput="renderIssuesTable()" style="min-width:200px;">
+        </div>
+      </div>
       ${adminMode ? '<p class="muted">As admin you can edit or delete any entry here. Store keepers can only add new entries — corrections go through you.</p>' : ''}
-      <div class="tablewrap"><table>
-        <tr><th>Issue No.</th><th>Date</th><th>Store</th><th>Item</th><th>Batch</th><th>Qty</th><th>Issued To</th><th>Style No.</th><th>Order Ref</th>${adminMode?'<th>Actions</th>':''}</tr>
-        ${(recent||[]).map(r=>`<tr><td>${r.issue_no}</td><td>${r.issue_date}</td><td>${r.stores?.name||''}</td><td>${r.items?.item_code} — ${r.items?.item_name}</td><td>${r.batch_no}</td><td>${fmt(r.qty)} ${r.items?.uom||''}</td><td>${r.issued_to||'-'}</td><td>${r.style_no||'-'}</td><td>${r.order_ref||'-'}</td>${adminMode?`<td><button class="btn ghost" style="padding:5px 10px;font-size:12px;" onclick='startEditIssue(${JSON.stringify(r)})'>Edit</button> <button class="btn rust" style="padding:5px 10px;font-size:12px;" onclick="deleteIssue('${r.id}','${r.issue_no}')">Delete</button></td>`:''}</tr>`).join('')}
-      </table></div>
+      <div id="issuesTableWrap"></div>
     </div>`;
+  renderIssuesTable();
+}
+function renderIssuesTable(){
+  const adminMode = isAdmin();
+  const typeFilter = document.getElementById('issueTypeFilter')?.value || '';
+  const search = (document.getElementById('issueSearchBox')?.value || '').toLowerCase();
+  let rows = window._issuesRecent || [];
+  if(typeFilter) rows = rows.filter(r=>(r.issue_type||'normal')===typeFilter);
+  if(search) rows = rows.filter(r=>
+    (r.items?.item_code||'').toLowerCase().includes(search) ||
+    (r.items?.item_name||'').toLowerCase().includes(search) ||
+    (r.order_ref||'').toLowerCase().includes(search) ||
+    (r.style_no||'').toLowerCase().includes(search) ||
+    (r.issued_to||'').toLowerCase().includes(search) ||
+    (r.issue_no||'').toLowerCase().includes(search)
+  );
+  document.getElementById('issuesTableWrap').innerHTML = `
+    <div class="tablewrap"><table>
+      <tr><th>Issue No.</th><th>Date</th><th>Store</th><th>Item</th><th>Batch</th><th>Qty</th><th>Type</th><th>Issued To</th><th>Style No.</th><th>Order Ref</th><th>Actions</th></tr>
+      ${rows.map(r=>`<tr><td>${r.issue_no}</td><td>${r.issue_date}</td><td>${r.stores?.name||''}</td><td>${r.items?.item_code} — ${r.items?.item_name}</td><td>${r.batch_no}</td><td>${fmt(r.qty)} ${r.items?.uom||''}</td><td>${r.issue_type==='wastage'?'<span class="badge low">Wastage</span>':r.issue_type==='return_to_supplier'?'<span class="tag">Return</span>':'<span class="badge ok">Normal</span>'}</td><td>${r.issued_to||'-'}</td><td>${r.style_no||'-'}</td><td>${r.order_ref||'-'}</td><td>${adminMode?`<button class="btn ghost" style="padding:5px 10px;font-size:12px;" onclick='startEditIssue(${JSON.stringify(r)})'>Edit</button> <button class="btn rust" style="padding:5px 10px;font-size:12px;" onclick='deleteIssue(${JSON.stringify(r)})'>Delete</button> `:''}<button class="btn ghost" style="padding:5px 10px;font-size:12px;" onclick='printVoucher("ISSUE", ${JSON.stringify(r)})'>Print</button></td></tr>`).join('')}
+    </table></div>
+    ${rows.length===0 ? '<p class="muted">No entries match.</p>' : ''}`;
+}
+function toggleIssueType(){
+  const type = document.getElementById('i_type').value;
+  document.getElementById('i_to_fld').style.display = type==='return_to_supplier' ? 'none' : '';
+  document.getElementById('i_supplier_fld').classList.toggle('hidden', type!=='return_to_supplier');
 }
 function startEditIssue(r){
   editingIssueId = r.id;
   document.getElementById('issueFormTitle').textContent = `Edit Issue — ${r.issue_no}`;
   document.getElementById('i_date').value = r.issue_date;
   document.getElementById('i_store').value = r.store_id;
-  document.getElementById('i_item').value = r.item_id;
+  setSearchableItemValue('i_item', r.item_id);
   document.getElementById('i_batch').value = r.batch_no;
   document.getElementById('i_qty').value = r.qty;
-  const deptSelect = document.getElementById('i_to');
-  const knownDept = Array.from(deptSelect.options).some(o=>o.value===r.issued_to);
-  if(knownDept){ deptSelect.value = r.issued_to; } else { deptSelect.value = 'Other'; document.getElementById('i_to_other').classList.remove('hidden'); document.getElementById('i_to_other').value = r.issued_to || ''; }
+  document.getElementById('i_type').value = r.issue_type || 'normal';
+  toggleIssueType();
+  if(r.issue_type==='return_to_supplier'){
+    document.getElementById('i_supplier').value = r.supplier_id || '';
+  } else {
+    const deptSelect = document.getElementById('i_to');
+    const knownDept = Array.from(deptSelect.options).some(o=>o.value===r.issued_to);
+    if(knownDept){ deptSelect.value = r.issued_to; } else { deptSelect.value = 'Other'; document.getElementById('i_to_other').classList.remove('hidden'); document.getElementById('i_to_other').value = r.issued_to || ''; }
+  }
   document.getElementById('i_style').value = r.style_no || '';
   document.getElementById('i_ref').value = r.order_ref || '';
   document.getElementById('i_submit_btn').textContent = 'Update Issue';
   document.getElementById('i_cancel_wrap').style.display = '';
   document.getElementById('issueFormCard').scrollIntoView({behavior:'smooth'});
 }
-async function deleteIssue(id, issueNo){
-  if(!confirm(`Delete issue "${issueNo}"? This will restore that stock quantity. Can't be undone.`)) return;
-  const { error } = await sb.from('issues').delete().eq('id', id);
+async function deleteIssue(r){
+  if(!confirm(`Delete issue "${r.issue_no}"? This will restore that stock quantity. Can't be undone.`)) return;
+  const { error } = await sb.from('issues').delete().eq('id', r.id);
   if(error){ alert('Error deleting: '+error.message); return; }
+  await logAudit('issues', r.id, 'DELETE', r, null);
   renderIssues();
 }
 async function submitIssue(ev){
   ev.preventDefault();
+  if(!document.getElementById('i_item').value){ alert('Please select a valid item from the list.'); return; }
+  const issueType = document.getElementById('i_type').value;
   const deptSelect = document.getElementById('i_to').value;
-  const issuedTo = deptSelect === 'Other' ? document.getElementById('i_to_other').value.trim() : deptSelect;
+  const issuedTo = issueType==='return_to_supplier' ? 'Return to Supplier' : (deptSelect === 'Other' ? document.getElementById('i_to_other').value.trim() : deptSelect);
   const payload = {
     issue_date: document.getElementById('i_date').value,
     store_id: document.getElementById('i_store').value, item_id: document.getElementById('i_item').value,
     batch_no: document.getElementById('i_batch').value, qty: parseFloat(document.getElementById('i_qty').value),
+    issue_type: issueType,
+    supplier_id: issueType==='return_to_supplier' ? (document.getElementById('i_supplier').value || null) : null,
     issued_to: issuedTo, style_no: document.getElementById('i_style').value, order_ref: document.getElementById('i_ref').value
   };
   if(editingIssueId){
     if(!isAdmin()){ alert('Only admin can edit existing issue entries.'); return; }
+    const oldRec = (await sb.from('issues').select('*').eq('id', editingIssueId).single()).data;
     const { error } = await sb.from('issues').update(payload).eq('id', editingIssueId);
     if(error){ alert('Error updating issue: '+error.message); return; }
+    await logAudit('issues', editingIssueId, 'UPDATE', oldRec, payload);
   } else {
     payload.issue_no = genNo('ISS');
     payload.created_by = CURRENT_USER.id;
-    const { error } = await sb.from('issues').insert(payload);
+    const { data: inserted, error } = await sb.from('issues').insert(payload).select().single();
     if(error){ alert('Error saving issue: '+error.message); return; }
+    await logAudit('issues', inserted?.id, 'INSERT', null, payload);
   }
   renderIssues();
 }
 
 /* ---------------- TRANSFERS ---------------- */
 let editingTransferId = null;
+let transferPageLimit = 30;
 async function renderTransfers(){
   const el = document.getElementById('mainArea');
-  const { data: recent } = await sb.from('transfers').select('*,items(item_code,item_name,uom)').order('created_at',{ascending:false}).limit(30);
+  const { data: recent } = await sb.from('transfers').select('*,items(item_code,item_name,uom)').order('created_at',{ascending:false}).limit(transferPageLimit);
   const fromStoreName = id => STORES.find(s=>s.id===id)?.name || '';
   const editable = canEdit('transfers');
   const adminMode = isAdmin();
   editingTransferId = null;
+  window._transfersRecent = recent || [];
+  window._transferStoreNameFn = fromStoreName;
   el.innerHTML = `
     ${editable ? `
     <div class="card" id="transferFormCard">
       <h2 id="transferFormTitle">New Transfer (Between Stores)</h2>
       <form class="inline" onsubmit="submitTransfer(event)">
         <div class="fld"><label>Date</label><input type="date" id="t_date" value="${todayStr()}" required></div>
-        <div class="fld"><label>Item</label><select id="t_item" required><option value="">Select</option>${itemOptions()}</select></div>
+        <div class="fld"><label>Item</label>${searchableItemSelect('t_item')} <button type="button" class="btn ghost" onclick="openScanner('t_item')" style="margin-left:4px;">📷 Scan</button></div>
         <div class="fld"><label>Batch / Lot No.</label><input id="t_batch" required></div>
         <div class="fld"><label>Qty</label><input type="number" id="t_qty" step="0.01" min="0.01" required></div>
         <div class="fld"><label>From Store</label><select id="t_from" required><option value="">Select</option>${storeOptions()}</select></div>
@@ -513,19 +767,44 @@ async function renderTransfers(){
       </form>
     </div>` : noEditNotice('Transfers')}
     <div class="card">
-      <h2>Recent Transfers</h2>
+      <div class="toolbar">
+        <h2 style="margin:0;border:none;padding:0;">Recent Transfers</h2>
+        <input id="transferSearchBox" placeholder="Search item, transfer no..." oninput="renderTransfersTable()" style="min-width:220px;">
+      </div>
       ${adminMode ? '<p class="muted">As admin you can edit or delete any entry here. Others can only add new entries — corrections go through you.</p>' : ''}
-      <div class="tablewrap"><table>
-        <tr><th>Transfer No.</th><th>Date</th><th>Item</th><th>Batch</th><th>Qty</th><th>From</th><th>To</th>${adminMode?'<th>Actions</th>':''}</tr>
-        ${(recent||[]).map(r=>`<tr><td>${r.transfer_no}</td><td>${r.transfer_date}</td><td>${r.items?.item_code} — ${r.items?.item_name}</td><td>${r.batch_no}</td><td>${fmt(r.qty)} ${r.items?.uom||''}</td><td>${fromStoreName(r.from_store_id)}</td><td>${fromStoreName(r.to_store_id)}</td>${adminMode?`<td><button class="btn ghost" style="padding:5px 10px;font-size:12px;" onclick='startEditTransfer(${JSON.stringify(r)})'>Edit</button> <button class="btn rust" style="padding:5px 10px;font-size:12px;" onclick="deleteTransfer('${r.id}','${r.transfer_no}')">Delete</button></td>`:''}</tr>`).join('')}
-      </table></div>
+      <div id="transfersTableWrap"></div>
+      <div style="text-align:center;margin-top:12px;">
+        <button class="btn ghost" onclick="loadMoreTransfers()">Load More</button>
+      </div>
     </div>`;
+  renderTransfersTable();
+}
+function renderTransfersTable(){
+  const adminMode = isAdmin();
+  const fromStoreName = window._transferStoreNameFn;
+  const search = (document.getElementById('transferSearchBox')?.value || '').toLowerCase();
+  let rows = window._transfersRecent || [];
+  if(search) rows = rows.filter(r=>
+    (r.items?.item_code||'').toLowerCase().includes(search) ||
+    (r.items?.item_name||'').toLowerCase().includes(search) ||
+    (r.transfer_no||'').toLowerCase().includes(search)
+  );
+  document.getElementById('transfersTableWrap').innerHTML = `
+    <div class="tablewrap"><table>
+      <tr><th>Transfer No.</th><th>Date</th><th>Item</th><th>Batch</th><th>Qty</th><th>From</th><th>To</th>${adminMode?'<th>Actions</th>':''}</tr>
+      ${rows.map(r=>`<tr><td>${r.transfer_no}</td><td>${r.transfer_date}</td><td>${r.items?.item_code} — ${r.items?.item_name}</td><td>${r.batch_no}</td><td>${fmt(r.qty)} ${r.items?.uom||''}</td><td>${fromStoreName(r.from_store_id)}</td><td>${fromStoreName(r.to_store_id)}</td>${adminMode?`<td><button class="btn ghost" style="padding:5px 10px;font-size:12px;" onclick='startEditTransfer(${JSON.stringify(r)})'>Edit</button> <button class="btn rust" style="padding:5px 10px;font-size:12px;" onclick='deleteTransfer(${JSON.stringify(r)})'>Delete</button></td>`:''}</tr>`).join('')}
+    </table></div>
+    ${rows.length===0 ? '<p class="muted">No entries match.</p>' : ''}`;
+}
+function loadMoreTransfers(){
+  transferPageLimit += 30;
+  renderTransfers();
 }
 function startEditTransfer(r){
   editingTransferId = r.id;
   document.getElementById('transferFormTitle').textContent = `Edit Transfer — ${r.transfer_no}`;
   document.getElementById('t_date').value = r.transfer_date;
-  document.getElementById('t_item').value = r.item_id;
+  setSearchableItemValue('t_item', r.item_id);
   document.getElementById('t_batch').value = r.batch_no;
   document.getElementById('t_qty').value = r.qty;
   document.getElementById('t_from').value = r.from_store_id;
@@ -534,14 +813,16 @@ function startEditTransfer(r){
   document.getElementById('t_cancel_wrap').style.display = '';
   document.getElementById('transferFormCard').scrollIntoView({behavior:'smooth'});
 }
-async function deleteTransfer(id, transferNo){
-  if(!confirm(`Delete transfer "${transferNo}"? This will reverse the stock movement. Can't be undone.`)) return;
-  const { error } = await sb.from('transfers').delete().eq('id', id);
+async function deleteTransfer(r){
+  if(!confirm(`Delete transfer "${r.transfer_no}"? This will reverse the stock movement. Can't be undone.`)) return;
+  const { error } = await sb.from('transfers').delete().eq('id', r.id);
   if(error){ alert('Error deleting: '+error.message); return; }
+  await logAudit('transfers', r.id, 'DELETE', r, null);
   renderTransfers();
 }
 async function submitTransfer(ev){
   ev.preventDefault();
+  if(!document.getElementById('t_item').value){ alert('Please select a valid item from the list.'); return; }
   const from = document.getElementById('t_from').value, to = document.getElementById('t_to').value;
   if(from===to){ alert('From and To store cannot be the same.'); return; }
   const payload = {
@@ -551,13 +832,16 @@ async function submitTransfer(ev){
   };
   if(editingTransferId){
     if(!isAdmin()){ alert('Only admin can edit existing transfers.'); return; }
+    const oldRec = (await sb.from('transfers').select('*').eq('id', editingTransferId).single()).data;
     const { error } = await sb.from('transfers').update(payload).eq('id', editingTransferId);
     if(error){ alert('Error updating transfer: '+error.message); return; }
+    await logAudit('transfers', editingTransferId, 'UPDATE', oldRec, payload);
   } else {
     payload.transfer_no = genNo('TRF');
     payload.created_by = CURRENT_USER.id;
-    const { error } = await sb.from('transfers').insert(payload);
+    const { data: inserted, error } = await sb.from('transfers').insert(payload).select().single();
     if(error){ alert('Error saving transfer: '+error.message); return; }
+    await logAudit('transfers', inserted?.id, 'INSERT', null, payload);
   }
   renderTransfers();
 }
@@ -566,7 +850,9 @@ async function submitTransfer(ev){
 async function renderStock(){
   const el = document.getElementById('mainArea');
   const { data } = await sb.from('v_stock_balance').select('*').order('item_name');
+  const { data: reserved } = await sb.from('v_reservations_summary').select('*');
   window._stockRows = data || [];
+  window._reservedSummary = reserved || [];
   el.innerHTML = `
     <div class="card">
       <div class="toolbar">
@@ -577,18 +863,82 @@ async function renderStock(){
         </div>
       </div>
       <div class="tablewrap" id="stockTableWrap"></div>
+    </div>
+    <div class="card">
+      <div class="toolbar">
+        <h2 style="margin:0;border:none;padding:0;">Aging / Dead-Stock Report</h2>
+        <button class="btn ghost" onclick="exportAgingExcel()">Export Excel</button>
+      </div>
+      <p class="muted">Age is measured from the most recent GRN (receipt) date for each item/batch still in stock. Batches with no matching GRN record (e.g. transferred-in only) are excluded.</p>
+      <div id="agingSummary"></div>
+      <div class="tablewrap" id="agingTableWrap">Loading…</div>
     </div>`;
   filterStock();
+  loadAgingReport();
+}
+async function loadAgingReport(){
+  const rows = (window._stockRows||[]).filter(r=>r.balance_qty>0);
+  if(rows.length===0){ document.getElementById('agingTableWrap').innerHTML = '<p class="muted">No stock on hand.</p>'; return; }
+  const { data: grnDates } = await sb.from('grn').select('item_id,store_id,batch_no,grn_date');
+  const lastGrnDate = {};
+  (grnDates||[]).forEach(g=>{
+    const k = `${g.store_id}||${g.item_id}||${g.batch_no}`;
+    if(!lastGrnDate[k] || g.grn_date > lastGrnDate[k]) lastGrnDate[k] = g.grn_date;
+  });
+  const today = new Date(todayStr());
+  const aged = rows.map(r=>{
+    const k = `${r.store_id}||${r.item_id}||${r.batch_no}`;
+    const grnDate = lastGrnDate[k];
+    if(!grnDate) return null;
+    const days = Math.floor((today - new Date(grnDate)) / (1000*60*60*24));
+    return { ...r, grnDate, days };
+  }).filter(Boolean).sort((a,b)=> b.days - a.days);
+  window._agingRows = aged;
+
+  const buckets = { '0-30':0, '31-60':0, '61-90':0, '90+':0 };
+  aged.forEach(r=>{
+    if(r.days<=30) buckets['0-30']++;
+    else if(r.days<=60) buckets['31-60']++;
+    else if(r.days<=90) buckets['61-90']++;
+    else buckets['90+']++;
+  });
+  document.getElementById('agingSummary').innerHTML = `
+    <div class="grid" style="margin-bottom:16px;">
+      <div class="stat"><div class="num">${buckets['0-30']}</div><div class="lbl">0–30 days</div></div>
+      <div class="stat"><div class="num">${buckets['31-60']}</div><div class="lbl">31–60 days</div></div>
+      <div class="stat warn"><div class="num">${buckets['61-90']}</div><div class="lbl">61–90 days</div></div>
+      <div class="stat warn"><div class="num">${buckets['90+']}</div><div class="lbl">90+ days (dead stock risk)</div></div>
+    </div>`;
+  document.getElementById('agingTableWrap').innerHTML = `
+    <table>
+      <tr><th>Store</th><th>Item</th><th>Batch</th><th>Balance</th><th>Last GRN Date</th><th>Age (days)</th><th>Status</th></tr>
+      ${aged.map(r=>{
+        const badge = r.days>90 ? '<span class="badge low">90+ days</span>' : r.days>60 ? '<span class="badge low">61-90 days</span>' : '<span class="badge ok">Fresh</span>';
+        return `<tr><td>${r.store_name}</td><td>${r.item_code} — ${r.item_name}</td><td>${r.batch_no||'-'}</td><td>${fmt(r.balance_qty)} ${r.uom}</td><td>${r.grnDate}</td><td>${r.days}</td><td>${badge}</td></tr>`;
+      }).join('')}
+    </table>`;
+}
+function exportAgingExcel(){
+  const rows = (window._agingRows||[]).map(r=>({
+    Store:r.store_name, ItemCode:r.item_code, ItemName:r.item_name, Batch:r.batch_no,
+    Balance:r.balance_qty, UOM:r.uom, LastGrnDate:r.grnDate, AgeDays:r.days
+  }));
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Aging Report');
+  XLSX.writeFile(wb, `Aging_Report_${todayStr()}.xlsx`);
 }
 function filterStock(){
   const f = document.getElementById('stockStoreFilter').value;
   const rows = (window._stockRows||[]).filter(r=> !f || r.store_id===f);
   document.getElementById('stockTableWrap').innerHTML = `
     <table>
-      <tr><th>Store</th><th>Item Code</th><th>Item Name</th><th>Batch</th><th>Balance Qty</th><th>UOM</th><th>Status</th></tr>
+      <tr><th>Store</th><th>Item Code</th><th>Item Name</th><th>Batch</th><th>Balance Qty</th><th>Reserved</th><th>Available</th><th>UOM</th><th>Status</th></tr>
       ${rows.map(r=>{
         const low = r.reorder_level>0 && r.balance_qty < r.reorder_level;
-        return `<tr><td>${r.store_name}</td><td>${r.item_code}</td><td>${r.item_name}</td><td>${r.batch_no||'-'}</td><td>${fmt(r.balance_qty)}</td><td>${r.uom}</td><td><span class="badge ${low?'low':'ok'}">${low?'LOW':'OK'}</span></td></tr>`;
+        const reservedQty = (window._reservedSummary||[]).filter(x=>x.item_id===r.item_id && x.store_id===r.store_id).reduce((a,x)=>a+Number(x.reserved_qty||0),0);
+        const available = r.balance_qty - reservedQty;
+        return `<tr><td>${r.store_name}</td><td>${r.item_code}</td><td>${r.item_name}</td><td>${r.batch_no||'-'}</td><td>${fmt(r.balance_qty)}</td><td>${reservedQty>0?fmt(reservedQty):'-'}</td><td><b>${fmt(available)}</b></td><td>${r.uom}</td><td><span class="badge ${low?'low':'ok'}">${low?'LOW':'OK'}</span></td></tr>`;
       }).join('')}
     </table>`;
 }
@@ -662,7 +1012,7 @@ async function runLedger(){
     summary[k].out += Number(r.out_qty||0);
   });
   const summaryRows = Object.entries(summary).map(([k,v])=>{
-    const cost = ITEMS.find(i=>i.id===v.item_id)?.standard_cost || 0;
+    const cost = itemCost(v.item_id);
     const openingQty = opening[k]||0;
     const closingQty = openingQty+v.in-v.out;
     return {
@@ -673,7 +1023,7 @@ async function runLedger(){
 
   window._ledgerSummary = summaryRows;
   window._ledgerDetail = rows.sort((a,b)=> a.move_date.localeCompare(b.move_date)).map(r=>{
-    const cost = ITEMS.find(i=>i.id===r.item_id)?.standard_cost || 0;
+    const cost = itemCost(r.item_id);
     return { ...r, inAmt: Number(r.in_qty||0)*cost, outAmt: Number(r.out_qty||0)*cost };
   });
 
@@ -806,7 +1156,7 @@ async function runStockCard(){
   const dates = Object.keys(byDate).sort();
 
   let running = openingBalance;
-  const cost = item.standard_cost || 0;
+  const cost = itemCost(item.id);
   const cardRows = dates.map(d=>{
     const day = byDate[d];
     const opening = running;
@@ -931,18 +1281,59 @@ async function renderItems(){
         </div>
         <div class="fld"><label>Reorder Level</label><input type="number" id="it_reorder" step="0.01" value="0"></div>
         <div class="fld"><label>Standard Cost</label><input type="number" id="it_cost" step="0.01" value="0"></div>
+        <div class="fld"><label>Barcode <span class="muted">(optional)</span></label><input id="it_barcode" placeholder="Leave blank to scan by item code"></div>
         <div class="fld"><button class="btn" type="submit" id="it_submit_btn">Save Item</button></div>
         <div class="fld" id="it_cancel_wrap" style="display:none;"><button class="btn ghost" type="button" onclick="renderItems()">Cancel</button></div>
       </form>
+      <div class="toolbar" style="margin-top:8px;border-top:1px solid var(--line);padding-top:14px;">
+        <div class="fld">
+          <label>Bulk Import (Excel/CSV — columns: item_code, item_name, category, uom, reorder_level, standard_cost)</label>
+          <input type="file" id="it_import_file" accept=".xlsx,.xls,.csv" onchange="importItemsFile(event)">
+        </div>
+      </div>
+      <p class="muted" id="it_import_status"></p>
     </div>` : noEditNotice('Items')}
     <div class="card">
       <h2>Item Master (${ITEMS.length})</h2>
       ${adminMode ? '<p class="muted">As admin you can edit or delete any item here. Others can only add new items — corrections go through you.</p>' : ''}
       <div class="tablewrap"><table>
-        <tr><th>Code</th><th>Name</th><th>Category</th><th>UOM</th><th>Reorder Level</th><th>Std. Cost</th>${adminMode?'<th>Actions</th>':''}</tr>
-        ${ITEMS.map(i=>`<tr><td>${i.item_code}</td><td>${i.item_name}</td><td>${i.category||'-'}</td><td>${i.uom}</td><td>${fmt(i.reorder_level)}</td><td>${fmt(i.standard_cost)}</td>${adminMode?`<td><button class="btn ghost" style="padding:5px 10px;font-size:12px;" onclick='startEditItem(${JSON.stringify(i)})'>Edit</button> <button class="btn rust" style="padding:5px 10px;font-size:12px;" onclick="deleteItem('${i.id}','${i.item_code}')">Delete</button></td>`:''}</tr>`).join('')}
+        <tr><th>Code</th><th>Name</th><th>Category</th><th>UOM</th><th>Reorder Level</th>${canSeeValue()?'<th>Std. Cost</th><th>Weighted Avg Cost</th>':''}${adminMode?'<th>Actions</th>':''}</tr>
+        ${ITEMS.map(i=>`<tr><td>${i.item_code}</td><td>${i.item_name}</td><td>${i.category||'-'}</td><td>${i.uom}</td><td>${fmt(i.reorder_level)}</td>${canSeeValue()?`<td>৳${fmt(i.standard_cost)}</td><td>${i.weighted_avg_cost>0?'৳'+fmt(i.weighted_avg_cost):'<span class="muted">no GRN yet</span>'}</td>`:''}${adminMode?`<td><button class="btn ghost" style="padding:5px 10px;font-size:12px;" onclick='startEditItem(${JSON.stringify(i)})'>Edit</button> <button class="btn rust" style="padding:5px 10px;font-size:12px;" onclick="deleteItem('${i.id}','${i.item_code}')">Delete</button></td>`:''}</tr>`).join('')}
       </table></div>
     </div>`;
+}
+async function importItemsFile(ev){
+  const file = ev.target.files[0];
+  if(!file) return;
+  const statusEl = document.getElementById('it_import_status');
+  statusEl.textContent = 'Reading file…';
+  const reader = new FileReader();
+  reader.onload = async (e)=>{
+    try{
+      const wb = XLSX.read(e.target.result, {type:'binary'});
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet);
+      if(rows.length===0){ statusEl.textContent = 'No rows found in file.'; return; }
+      const payloads = rows.map(r=>({
+        item_code: String(r.item_code||r.Item_Code||r.ItemCode||'').trim(),
+        item_name: String(r.item_name||r.Item_Name||r.ItemName||'').trim(),
+        category: String(r.category||r.Category||'').trim() || null,
+        uom: String(r.uom||r.UOM||'').trim(),
+        reorder_level: parseFloat(r.reorder_level||r.Reorder_Level||0) || 0,
+        standard_cost: parseFloat(r.standard_cost||r.Standard_Cost||0) || 0
+      })).filter(p=>p.item_code && p.item_name && p.uom);
+      if(payloads.length===0){ statusEl.textContent = 'No valid rows — check that item_code, item_name, and uom columns are filled in.'; return; }
+      statusEl.textContent = `Importing ${payloads.length} items…`;
+      const { data: inserted, error } = await sb.from('items').insert(payloads).select();
+      if(error){ statusEl.textContent = 'Import error: '+error.message; return; }
+      await logAudit('items', 'bulk', 'INSERT', null, {count: payloads.length, source: file.name});
+      statusEl.textContent = `Imported ${inserted?.length||payloads.length} items successfully.`;
+      await loadMasters(); renderItems();
+    }catch(err){
+      statusEl.textContent = 'Could not read file: '+err.message;
+    }
+  };
+  reader.readAsBinaryString(file);
 }
 function startEditItem(i){
   editingItemId = i.id;
@@ -957,14 +1348,17 @@ function startEditItem(i){
   if(knownUom){ uomSelect.value = i.uom; } else { uomSelect.value = 'Other'; document.getElementById('it_uom_other').classList.remove('hidden'); document.getElementById('it_uom_other').value = i.uom || ''; }
   document.getElementById('it_reorder').value = i.reorder_level;
   document.getElementById('it_cost').value = i.standard_cost;
+  document.getElementById('it_barcode').value = i.barcode || '';
   document.getElementById('it_submit_btn').textContent = 'Update Item';
   document.getElementById('it_cancel_wrap').style.display = '';
   document.getElementById('itemFormCard').scrollIntoView({behavior:'smooth'});
 }
 async function deleteItem(id, code){
   if(!confirm(`Delete item "${code}"? This will fail if GRN/Issue/Transfer records already reference it. Can't be undone.`)) return;
+  const oldRec = ITEMS.find(i=>i.id===id);
   const { error } = await sb.from('items').delete().eq('id', id);
   if(error){ alert('Cannot delete: '+error.message+'\n\nThis item likely has existing GRN, Issue, or Transfer records. Consider editing it instead, or mark it inactive.'); return; }
+  await logAudit('items', id, 'DELETE', oldRec, null);
   await loadMasters(); renderItems();
 }
 async function submitItem(ev){
@@ -977,15 +1371,19 @@ async function submitItem(ev){
     item_code: document.getElementById('it_code').value, item_name: document.getElementById('it_name').value,
     category: category, uom: uom,
     reorder_level: parseFloat(document.getElementById('it_reorder').value||0),
-    standard_cost: parseFloat(document.getElementById('it_cost').value||0)
+    standard_cost: parseFloat(document.getElementById('it_cost').value||0),
+    barcode: document.getElementById('it_barcode').value.trim() || null
   };
   if(editingItemId){
     if(!isAdmin()){ alert('Only admin can edit existing items.'); return; }
+    const oldRec = ITEMS.find(i=>i.id===editingItemId);
     const { error } = await sb.from('items').update(payload).eq('id', editingItemId);
     if(error){ alert('Error: '+error.message); return; }
+    await logAudit('items', editingItemId, 'UPDATE', oldRec, payload);
   } else {
-    const { error } = await sb.from('items').insert(payload);
+    const { data: inserted, error } = await sb.from('items').insert(payload).select().single();
     if(error){ alert('Error: '+error.message); return; }
+    await logAudit('items', inserted?.id, 'INSERT', null, payload);
   }
   await loadMasters(); renderItems();
 }
@@ -1038,8 +1436,10 @@ function startEditStore(s){
 }
 async function deleteStore(id, name){
   if(!confirm(`Delete store "${name}"? This will fail if GRN/Issue/Transfer records already reference it. Can't be undone.`)) return;
+  const oldRec = STORES.find(s=>s.id===id);
   const { error } = await sb.from('stores').delete().eq('id', id);
   if(error){ alert('Cannot delete: '+error.message+'\n\nThis store likely has existing transaction records. Consider marking it inactive instead.'); return; }
+  await logAudit('stores', id, 'DELETE', oldRec, null);
   await loadMasters(); renderStores();
 }
 async function submitStore(ev){
@@ -1047,16 +1447,283 @@ async function submitStore(ev){
   const payload = { name: document.getElementById('st_name').value, code: document.getElementById('st_code').value, type: document.getElementById('st_type').value };
   if(editingStoreId){
     if(!isAdmin()){ alert('Only admin can edit existing stores.'); return; }
+    const oldRec = STORES.find(s=>s.id===editingStoreId);
     const { error } = await sb.from('stores').update(payload).eq('id', editingStoreId);
     if(error){ alert('Error: '+error.message); return; }
+    await logAudit('stores', editingStoreId, 'UPDATE', oldRec, payload);
   } else {
-    const { error } = await sb.from('stores').insert(payload);
+    const { data: inserted, error } = await sb.from('stores').insert(payload).select().single();
     if(error){ alert('Error: '+error.message); return; }
+    await logAudit('stores', inserted?.id, 'INSERT', null, payload);
   }
   await loadMasters(); renderStores();
 }
 
 /* ---------------- SUPPLIERS MASTER ---------------- */
+/* ---------------- PURCHASE ORDERS ---------------- */
+let poLineDraft = [];
+async function renderPO(){
+  const el = document.getElementById('mainArea');
+  const editable = canEdit('po');
+  const adminMode = isAdmin();
+  const { data: pos } = await sb.from('purchase_orders').select('*,suppliers(name)').order('created_at',{ascending:false}).limit(50);
+  window._poList = pos || [];
+  poLineDraft = [];
+  el.innerHTML = `
+    ${editable ? `
+    <div class="card">
+      <h2>New Purchase Order</h2>
+      <form class="inline" onsubmit="event.preventDefault();">
+        <div class="fld"><label>PO Date</label><input type="date" id="po_date" value="${todayStr()}"></div>
+        <div class="fld"><label>Supplier</label><select id="po_supplier"><option value="">-</option>${SUPPLIERS.map(s=>`<option value="${s.id}">${s.name}</option>`).join('')}</select></div>
+        <div class="fld"><label>Remarks</label><input id="po_remarks" placeholder="Optional note"></div>
+      </form>
+      <h3 style="font-size:14px;color:var(--navy);margin-top:16px;">Add Line Items</h3>
+      <form class="inline" onsubmit="addPoLine(event)">
+        <div class="fld"><label>Item</label>${searchableItemSelect('po_item')}</div>
+        <div class="fld"><label>Qty Ordered</label><input type="number" id="po_qty" step="0.01" min="0.01" required></div>
+        <div class="fld"><label>Unit Price</label><input type="number" id="po_price" step="0.01" value="0"></div>
+        <div class="fld"><button class="btn ghost" type="submit">+ Add Line</button></div>
+      </form>
+      <div id="poLinesWrap"></div>
+      <button class="btn" style="margin-top:12px;" onclick="submitPO()">Save Purchase Order</button>
+    </div>` : noEditNotice('Purchase Orders')}
+    <div class="card">
+      <h2>Purchase Orders</h2>
+      <div class="tablewrap"><table>
+        <tr><th>PO No.</th><th>Date</th><th>Supplier</th><th>Status</th><th>Remarks</th><th>Actions</th></tr>
+        ${window._poList.map(p=>`<tr><td>${p.po_no}</td><td>${p.po_date}</td><td>${p.suppliers?.name||'-'}</td><td><span class="badge ${p.status==='closed'?'ok':'low'}">${p.status}</span></td><td>${p.remarks||'-'}</td><td><button class="btn ghost" style="padding:5px 10px;font-size:12px;" onclick='viewPO(${JSON.stringify(p)})'>View / Receive</button>${adminMode?` <button class="btn rust" style="padding:5px 10px;font-size:12px;" onclick="deletePO('${p.id}','${p.po_no}')">Delete</button>`:''}</td></tr>`).join('')}
+      </table></div>
+    </div>
+    <div class="card hidden" id="poDetailCard"></div>`;
+  renderPoLinesDraft();
+}
+function addPoLine(ev){
+  ev.preventDefault();
+  const itemId = document.getElementById('po_item').value;
+  if(!itemId){ alert('Please select a valid item from the list.'); return; }
+  const item = ITEMS.find(i=>i.id===itemId);
+  const qty = parseFloat(document.getElementById('po_qty').value);
+  const price = parseFloat(document.getElementById('po_price').value||0);
+  poLineDraft.push({ item_id: itemId, item_code: item.item_code, item_name: item.item_name, uom: item.uom, qty_ordered: qty, unit_price: price });
+  document.getElementById('po_qty').value = '';
+  document.getElementById('po_price').value = '0';
+  document.getElementById('po_item_search').value = '';
+  document.getElementById('po_item').value = '';
+  renderPoLinesDraft();
+}
+function removePoLine(idx){
+  poLineDraft.splice(idx,1);
+  renderPoLinesDraft();
+}
+function renderPoLinesDraft(){
+  document.getElementById('poLinesWrap').innerHTML = poLineDraft.length===0 ? '<p class="muted">No lines added yet.</p>' : `
+    <table style="margin-top:8px;">
+      <tr><th>Item</th><th>Qty Ordered</th><th>Unit Price</th><th>Line Total</th><th></th></tr>
+      ${poLineDraft.map((l,idx)=>`<tr><td>${l.item_code} — ${l.item_name}</td><td>${fmt(l.qty_ordered)} ${l.uom}</td><td>৳${fmt(l.unit_price)}</td><td>৳${fmt(l.qty_ordered*l.unit_price)}</td><td><button class="btn rust" style="padding:4px 8px;font-size:11px;" onclick="removePoLine(${idx})">Remove</button></td></tr>`).join('')}
+    </table>`;
+}
+async function submitPO(){
+  if(poLineDraft.length===0){ alert('Add at least one line item.'); return; }
+  const payload = {
+    po_no: genNo('PO'), po_date: document.getElementById('po_date').value,
+    supplier_id: document.getElementById('po_supplier').value || null,
+    remarks: document.getElementById('po_remarks').value, status: 'open',
+    created_by: CURRENT_USER.id
+  };
+  const { data: po, error } = await sb.from('purchase_orders').insert(payload).select().single();
+  if(error){ alert('Error saving PO: '+error.message); return; }
+  const lines = poLineDraft.map(l=>({ po_id: po.id, item_id: l.item_id, qty_ordered: l.qty_ordered, unit_price: l.unit_price }));
+  const { error: lineErr } = await sb.from('po_lines').insert(lines);
+  if(lineErr){ alert('PO saved but lines failed: '+lineErr.message); return; }
+  await logAudit('purchase_orders', po.id, 'INSERT', null, {...payload, lines: poLineDraft.length});
+  renderPO();
+}
+async function deletePO(id, poNo){
+  if(!confirm(`Delete PO "${poNo}"? This will remove its line items too. Any GRN already received against it will keep its history but lose the link. Can't be undone.`)) return;
+  const { error } = await sb.from('purchase_orders').delete().eq('id', id);
+  if(error){ alert('Error: '+error.message); return; }
+  await logAudit('purchase_orders', id, 'DELETE', {po_no: poNo}, null);
+  renderPO();
+}
+async function viewPO(po){
+  const { data: lines } = await sb.from('po_lines').select('*,items(item_code,item_name,uom)').eq('po_id', po.id);
+  const card = document.getElementById('poDetailCard');
+  card.classList.remove('hidden');
+  card.innerHTML = `
+    <h2>PO ${po.po_no} — ${po.suppliers?.name||'No supplier'} (${po.po_date})</h2>
+    <div class="tablewrap"><table>
+      <tr><th>Item</th><th>Ordered</th><th>Received</th><th>Remaining</th><th>Unit Price</th></tr>
+      ${(lines||[]).map(l=>`<tr><td>${l.items?.item_code} — ${l.items?.item_name}</td><td>${fmt(l.qty_ordered)} ${l.items?.uom}</td><td>${fmt(l.qty_received)}</td><td><b>${fmt(l.qty_ordered-l.qty_received)}</b></td><td>৳${fmt(l.unit_price)}</td></tr>`).join('')}
+    </table></div>
+    <p class="muted">To receive against this PO, go to GRN entry and pick the matching item — receipts recorded there with a PO Ref matching "${po.po_no}" will need manual reconciliation for now. Full auto-linking from the GRN form is planned for a future update.</p>
+    <button class="btn ghost" onclick="document.getElementById('poDetailCard').classList.add('hidden')">Close</button>`;
+  card.scrollIntoView({behavior:'smooth'});
+}
+
+/* ---------------- PHYSICAL STOCK COUNT / RECONCILIATION ---------------- */
+async function renderStockCount(){
+  const el = document.getElementById('mainArea');
+  const editable = canEdit('stockcount');
+  const adminMode = isAdmin();
+  const { data: counts } = await sb.from('stock_counts').select('*,stores(name)').order('created_at',{ascending:false}).limit(30);
+  window._countsList = counts || [];
+  el.innerHTML = `
+    ${editable ? `
+    <div class="card">
+      <h2>Start New Stock Count</h2>
+      <form class="inline" onsubmit="startStockCount(event)">
+        <div class="fld"><label>Count Date</label><input type="date" id="sc_date" value="${todayStr()}"></div>
+        <div class="fld"><label>Store</label><select id="sc_store" required><option value="">Select</option>${storeOptions()}</select></div>
+        <div class="fld"><button class="btn" type="submit">Start Count</button></div>
+      </form>
+      <p class="muted">This loads the current system balance for every item in that store, so you can enter what you physically counted next to it.</p>
+    </div>` : noEditNotice('Stock Count')}
+    <div class="card">
+      <h2>Past Counts</h2>
+      <div class="tablewrap"><table>
+        <tr><th>Count No.</th><th>Date</th><th>Store</th><th>Status</th><th>Actions</th></tr>
+        ${window._countsList.map(c=>`<tr><td>${c.count_no}</td><td>${c.count_date}</td><td>${c.stores?.name||''}</td><td><span class="badge ${c.status==='finalized'?'ok':'low'}">${c.status}</span></td><td><button class="btn ghost" style="padding:5px 10px;font-size:12px;" onclick="openStockCount('${c.id}')">Open</button></td></tr>`).join('')}
+      </table></div>
+    </div>
+    <div class="card hidden" id="countDetailCard"></div>`;
+}
+async function startStockCount(ev){
+  ev.preventDefault();
+  const storeId = document.getElementById('sc_store').value;
+  const { data: balances } = await sb.from('v_stock_balance').select('*').eq('store_id', storeId);
+  const rows = (balances||[]).filter(r=>r.balance_qty !== 0 || r.batch_no);
+  const payload = { count_no: genNo('CNT'), count_date: document.getElementById('sc_date').value, store_id: storeId, status: 'draft', created_by: CURRENT_USER.id };
+  const { data: count, error } = await sb.from('stock_counts').insert(payload).select().single();
+  if(error){ alert('Error: '+error.message); return; }
+  const lines = rows.map(r=>({ count_id: count.id, item_id: r.item_id, batch_no: r.batch_no, system_qty: r.balance_qty, counted_qty: null, variance: 0 }));
+  if(lines.length>0) await sb.from('stock_count_lines').insert(lines);
+  await logAudit('stock_counts', count.id, 'INSERT', null, {...payload, line_count: lines.length});
+  renderStockCount();
+  setTimeout(()=>openStockCount(count.id), 300);
+}
+async function openStockCount(countId){
+  const { data: count } = await sb.from('stock_counts').select('*,stores(name)').eq('id', countId).single();
+  const { data: lines } = await sb.from('stock_count_lines').select('*,items(item_code,item_name,uom)').eq('count_id', countId).order('id');
+  window._currentCount = count;
+  window._currentCountLines = lines || [];
+  const card = document.getElementById('countDetailCard');
+  card.classList.remove('hidden');
+  const isDraft = count.status === 'draft';
+  const canFinalize = isAdmin() || canEdit('stockcount');
+  card.innerHTML = `
+    <div class="toolbar">
+      <h2 style="margin:0;border:none;padding:0;">Count ${count.count_no} — ${count.stores?.name} (${count.count_date})</h2>
+      <span class="badge ${isDraft?'low':'ok'}">${count.status}</span>
+    </div>
+    <div class="tablewrap"><table>
+      <tr><th>Item</th><th>Batch</th><th>System Qty</th><th>Counted Qty</th><th>Variance</th></tr>
+      ${(lines||[]).map(l=>`<tr><td>${l.items?.item_code} — ${l.items?.item_name}</td><td>${l.batch_no||'-'}</td><td>${fmt(l.system_qty)}</td><td>${isDraft ? `<input type="number" step="0.01" value="${l.counted_qty ?? ''}" style="width:100px;" onchange="updateCountLine('${l.id}', this.value)">` : fmt(l.counted_qty)}</td><td id="variance_${l.id}">${l.counted_qty!==null ? fmt(l.counted_qty-l.system_qty) : '-'}</td></tr>`).join('')}
+    </table></div>
+    ${isDraft && canFinalize ? `<button class="btn" style="margin-top:14px;" onclick="finalizeStockCount('${count.id}')">Finalize Count &amp; Post Adjustments</button> <p class="muted">Finalizing creates GRN entries (Production Return type) for positive variance and Issue entries (Wastage type) for negative variance, so system stock matches what you physically counted.</p>` : ''}
+    <button class="btn ghost" style="margin-top:14px;" onclick="document.getElementById('countDetailCard').classList.add('hidden')">Close</button>`;
+  card.scrollIntoView({behavior:'smooth'});
+}
+async function updateCountLine(lineId, val){
+  const counted = val==='' ? null : parseFloat(val);
+  const line = window._currentCountLines.find(l=>l.id===lineId);
+  const variance = counted!==null ? counted - line.system_qty : 0;
+  await sb.from('stock_count_lines').update({ counted_qty: counted, variance }).eq('id', lineId);
+  line.counted_qty = counted; line.variance = variance;
+  document.getElementById('variance_'+lineId).textContent = counted!==null ? fmt(variance) : '-';
+}
+async function finalizeStockCount(countId){
+  const lines = window._currentCountLines.filter(l=>l.counted_qty!==null && l.counted_qty !== l.system_qty);
+  if(!confirm(`Finalize this count? ${lines.length} item(s) have a variance and will get adjustment entries posted. This can't be undone.`)) return;
+  const count = window._currentCount;
+  for(const l of lines){
+    const diff = l.counted_qty - l.system_qty;
+    if(diff > 0){
+      await sb.from('grn').insert({
+        grn_no: genNo('GRN'), grn_date: count.count_date, store_id: count.store_id, item_id: l.item_id,
+        batch_no: l.batch_no || 'COUNT-ADJ', qty: diff, unit_cost: 0, grn_type: 'production_return',
+        po_ref: `Stock count adjustment — ${count.count_no}`, created_by: CURRENT_USER.id
+      });
+    } else if(diff < 0){
+      await sb.from('issues').insert({
+        issue_no: genNo('ISS'), issue_date: count.count_date, store_id: count.store_id, item_id: l.item_id,
+        batch_no: l.batch_no || 'COUNT-ADJ', qty: Math.abs(diff), issue_type: 'wastage',
+        issued_to: `Stock count adjustment — ${count.count_no}`, created_by: CURRENT_USER.id
+      });
+    }
+  }
+  await sb.from('stock_counts').update({ status: 'finalized', finalized_by: CURRENT_USER.id, finalized_at: new Date().toISOString() }).eq('id', countId);
+  await logAudit('stock_counts', countId, 'UPDATE', {status:'draft'}, {status:'finalized', adjustments: lines.length});
+  await loadMasters();
+  renderStockCount();
+}
+
+/* ---------------- BUYER / ORDER-LEVEL STOCK RESERVATION ---------------- */
+async function renderReservations(){
+  const el = document.getElementById('mainArea');
+  const editable = canEdit('reservations');
+  const adminMode = isAdmin();
+  const { data: reservations } = await sb.from('reservations').select('*,items(item_code,item_name,uom),stores(name)').eq('status','active').order('created_at',{ascending:false});
+  const { data: balances } = await sb.from('v_stock_balance').select('*');
+  window._reservationsList = reservations || [];
+  window._balancesForReservations = balances || [];
+  el.innerHTML = `
+    ${editable ? `
+    <div class="card">
+      <h2>New Reservation</h2>
+      <form class="inline" onsubmit="submitReservation(event)">
+        <div class="fld"><label>Item</label>${searchableItemSelect('rv_item')}</div>
+        <div class="fld"><label>Store</label><select id="rv_store" required><option value="">Select</option>${storeOptions()}</select></div>
+        <div class="fld"><label>Qty to Reserve</label><input type="number" id="rv_qty" step="0.01" min="0.01" required></div>
+        <div class="fld"><label>Order / Job Ref</label><input id="rv_ref" placeholder="Buyer PO / Job card"></div>
+        <div class="fld"><label>Style No.</label><input id="rv_style" placeholder="Buyer style number"></div>
+        <div class="fld"><button class="btn" type="submit">Reserve Stock</button></div>
+      </form>
+    </div>` : noEditNotice('Reservations')}
+    <div class="card">
+      <h2>Active Reservations</h2>
+      <p class="muted">Reserved stock is held against an order but not physically moved yet — it reduces what's shown as "Available" below, without changing actual store balance.</p>
+      <div class="tablewrap"><table>
+        <tr><th>Item</th><th>Store</th><th>Reserved Qty</th><th>Order Ref</th><th>Style No.</th><th>Available at Reservation</th><th>Actions</th></tr>
+        ${window._reservationsList.map(r=>{
+          const bal = window._balancesForReservations.filter(b=>b.item_id===r.item_id && b.store_id===r.store_id).reduce((a,b)=>a+Number(b.balance_qty||0),0);
+          return `<tr><td>${r.items?.item_code} — ${r.items?.item_name}</td><td>${r.stores?.name}</td><td>${fmt(r.qty)} ${r.items?.uom||''}</td><td>${r.order_ref||'-'}</td><td>${r.style_no||'-'}</td><td>${fmt(bal)}</td><td><button class="btn ghost" style="padding:5px 10px;font-size:12px;" onclick="fulfillReservation('${r.id}')">Mark Fulfilled</button> <button class="btn rust" style="padding:5px 10px;font-size:12px;" onclick="releaseReservation('${r.id}')">Release</button></td></tr>`;
+        }).join('')}
+      </table></div>
+      ${window._reservationsList.length===0 ? '<p class="muted">No active reservations.</p>' : ''}
+    </div>`;
+}
+async function submitReservation(ev){
+  ev.preventDefault();
+  const itemId = document.getElementById('rv_item').value;
+  if(!itemId){ alert('Please select a valid item from the list.'); return; }
+  const payload = {
+    item_id: itemId, store_id: document.getElementById('rv_store').value,
+    qty: parseFloat(document.getElementById('rv_qty').value),
+    order_ref: document.getElementById('rv_ref').value, style_no: document.getElementById('rv_style').value,
+    status: 'active', created_by: CURRENT_USER.id
+  };
+  const { data: inserted, error } = await sb.from('reservations').insert(payload).select().single();
+  if(error){ alert('Error: '+error.message); return; }
+  await logAudit('reservations', inserted?.id, 'INSERT', null, payload);
+  renderReservations();
+}
+async function releaseReservation(id){
+  if(!confirm('Release this reservation? The reserved quantity becomes available again.')) return;
+  const { error } = await sb.from('reservations').update({status:'released'}).eq('id', id);
+  if(error){ alert('Error: '+error.message); return; }
+  await logAudit('reservations', id, 'UPDATE', {status:'active'}, {status:'released'});
+  renderReservations();
+}
+async function fulfillReservation(id){
+  if(!confirm('Mark this reservation as fulfilled? This just closes it out for tracking — actual stock should already have been issued separately.')) return;
+  const { error } = await sb.from('reservations').update({status:'fulfilled'}).eq('id', id);
+  if(error){ alert('Error: '+error.message); return; }
+  await logAudit('reservations', id, 'UPDATE', {status:'active'}, {status:'fulfilled'});
+  renderReservations();
+}
+
+/* ---------------- SUPPLIERS ---------------- */
 async function renderSuppliers(){
   const el = document.getElementById('mainArea');
   const editable = canEdit('suppliers');
@@ -1144,8 +1811,10 @@ function cancelEditUser(){
 async function deleteUser(id, username){
   if(id === CURRENT_USER.id){ alert("You can't delete your own account while logged in."); return; }
   if(!confirm(`Delete user "${username}"? This can't be undone.`)) return;
+  const { data: oldRec } = await sb.from('app_users').select('id,username,full_name,role,is_active').eq('id', id).single();
   const { error } = await sb.from('app_users').delete().eq('id', id);
   if(error){ alert('Error deleting user: '+error.message); return; }
+  await logAudit('app_users', id, 'DELETE', oldRec, null);
   renderUsers();
 }
 async function submitUser(ev){
@@ -1157,16 +1826,20 @@ async function submitUser(ev){
     is_active: document.getElementById('u_active').value === 'true'
   };
   const pass = document.getElementById('u_pass').value;
+  const auditPayload = { ...payload }; // never log password contents
 
   if(editingUserId){
     if(pass) payload.password_hash = pass;
+    const { data: oldRec } = await sb.from('app_users').select('id,username,full_name,role,is_active').eq('id', editingUserId).single();
     const { error } = await sb.from('app_users').update(payload).eq('id', editingUserId);
     if(error){ alert('Error: '+error.message); return; }
+    await logAudit('app_users', editingUserId, 'UPDATE', oldRec, { ...auditPayload, password_changed: !!pass });
   } else {
     if(!pass){ alert('Password is required for a new user.'); return; }
     payload.password_hash = pass;
-    const { error } = await sb.from('app_users').insert(payload);
+    const { data: inserted, error } = await sb.from('app_users').insert(payload).select().single();
     if(error){ alert('Error: '+error.message); return; }
+    await logAudit('app_users', inserted?.id, 'INSERT', null, auditPayload);
   }
   renderUsers();
 }
